@@ -74,3 +74,5 @@ The tab connects to the bridge on the machine that serves the page for a plain-`
 ## License
 
 MIT.
+
+If the bridge is useful to you, a star on this repository helps others find it — and tells us it is worth the care.
