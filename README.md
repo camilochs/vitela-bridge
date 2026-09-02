@@ -71,6 +71,7 @@ itself. To get a new code, delete that file or set `VITELA_BRIDGE_CODE`.
 | `revision_propose_set` | Propose several edits as one change: one card, one group in the sidecar, one Accept for all of them. The check runs over the result of the whole set, and an edit that cannot be placed fails the set — nothing half-applied |
 | `asset_put` | Write an image or PDF into the project (base64, up to 8 MB) so a proposed figure can point at it |
 | `page_image` | One page of the compiled PDF as an image, so the agent can judge what only the eye can judge |
+| `revision_withdraw` | Take back a proposal the agent made: the construct leaves and the document returns to what it said before |
 | `revisions_prune` | Drop sidecar records whose construct is no longer in the text |
 | `revisions_list` | Pending revisions and their authors |
 

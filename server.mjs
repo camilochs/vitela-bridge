@@ -252,6 +252,16 @@ server.registerTool("page_image", {
   }
 });
 
+server.registerTool("sidecar_rebuild", {
+  description: "Last resort when the compiler can no longer read a file's sidecar and every Accept and Reject fails: the broken sidecar is kept in the project as <name>.xtexrev.broken, and a fresh one is written carrying the records whose constructs are still in the text. Attribution history is preserved as a file, never discarded. `file` is the document, e.g. main.xtex.",
+  inputSchema: { file: z.string().optional() },
+}, run("sidecar.rebuild"));
+
+server.registerTool("revision_withdraw", {
+  description: "Take back a proposal the agent itself made: the construct leaves the text and the document returns to what it said before — an addition's text goes, a deletion's and a substitution's original text stays — and the sidecar record goes with it. Only a revision whose author is an agent can be withdrawn; the author's own changes are the author's. Use it when a proposal was wrong, or when the compiler can no longer resolve it, instead of asking the author to repair it by hand.",
+  inputSchema: { id: z.string() },
+}, run("revision.withdraw"));
+
 server.registerTool("revisions_prune", {
   description: "Drop sidecar records whose construct is no longer in the text — the repair for a record left behind when a change removed prose that held another pending one. Returns the ids dropped. It never touches a record whose construct is still there.",
   inputSchema: {},
