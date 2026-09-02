@@ -85,6 +85,22 @@ const run = (tool, timeout) => async (args) => {
   }
 };
 
+/**
+ * Who proposed a change, for the sidecar: never a bare "agent". The MCP
+ * client names itself at the handshake (Claude Code and its version, Cursor,
+ * ...) and that part is read here, not asked; the model and its provider
+ * only the agent can state, so the tool takes them as arguments. The
+ * author string reads, for instance:
+ *   agent · claude-code 2.1.250 · claude-fable-5-1 (Anthropic)
+ */
+function authorOf(args) {
+  const client = server.server.getClientVersion?.();
+  const parts = ["agent"];
+  if (client?.name) parts.push(client.version ? `${client.name} ${client.version}` : client.name);
+  if (args.model) parts.push(args.provider ? `${args.model} (${args.provider})` : String(args.model));
+  return parts.join(" \u00b7 ");
+}
+
 const server = new McpServer({ name: "vitela-bridge", version: "0.1.0" });
 
 server.registerTool("bridge_status", {
@@ -138,7 +154,7 @@ server.registerTool("report", {
 }, run("report"));
 
 server.registerTool("revision_propose", {
-  description: "Propose a change as an ExactTeX revision (@add/@del/@sub) the author accepts or rejects in Vitela. Never edits text directly. `anchor` is exact prose to find in the file (first occurrence in live text); for add, the new text is inserted right after the anchor (placement `inline`, default) or as a paragraph of its own after the anchor's line (placement `paragraph`); for del, the anchor itself is proposed for removal; for sub, the anchor is proposed to become `text`.",
+  description: "Propose a change as an ExactTeX revision (@add/@del/@sub) the author accepts or rejects in Vitela. Never edits text directly. `anchor` is exact prose to find in the file (first occurrence in live text); for add, the new text is inserted right after the anchor (placement `inline`, default) or as a paragraph of its own after the anchor's line (placement `paragraph`); for del, the anchor itself is proposed for removal; for sub, the anchor is proposed to become `text`. Always pass `model` (the model you run on, e.g. claude-fable-5-1) and `provider` (e.g. Anthropic): the revision is signed with your client, version and model so the author can trace who proposed what.",
   inputSchema: {
     file: z.string(),
     kind: z.enum(["add", "del", "sub"]),
@@ -146,8 +162,16 @@ server.registerTool("revision_propose", {
     text: z.string().optional(),
     message: z.string().optional(),
     placement: z.enum(["inline", "paragraph"]).optional(),
+    model: z.string().optional(),
+    provider: z.string().optional(),
   },
-}, run("revision.propose"));
+}, async (args) => {
+  try {
+    return text(await callTab("revision.propose", { ...(args ?? {}), author: authorOf(args ?? {}) }));
+  } catch (error) {
+    return fail(error);
+  }
+});
 
 server.registerTool("revisions_list", {
   description: "Pending revisions in the open project with their authors and status.",

@@ -57,7 +57,7 @@ The code changes every time the bridge starts. A reload of the tab keeps the pai
 | `compile` | Compile to PDF; page count and diagnostics |
 | `claims`, `verify` | The document's external claims; verify them against the public registries and write the dated record |
 | `report` | The submission report's data |
-| `revision_propose` | Propose an addition, deletion or substitution as a revision the author accepts or rejects |
+| `revision_propose` | Propose an addition, deletion or substitution as a revision the author accepts or rejects. Signed with the client and version (read from the MCP handshake) and the `model` and `provider` the agent states — e.g. `agent · claude-code 2.1.250 · claude-fable-5-1 (Anthropic)` — so every proposal is traceable |
 | `revisions_list` | Pending revisions and their authors |
 
 ## Configuration
