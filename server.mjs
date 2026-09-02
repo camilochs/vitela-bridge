@@ -187,7 +187,7 @@ server.registerTool("report", {
 }, run("report"));
 
 server.registerTool("revision_propose", {
-  description: "Propose a change as an ExactTeX revision (@add/@del/@sub) the author accepts or rejects in Vitela. Never edits text directly. `anchor` is exact prose to find in the file (first occurrence in live text); for add, the new text is inserted right after the anchor (placement `inline`, default), as a paragraph of its own after the anchor's line (placement `paragraph`), or as a block on its own lines (placement `block`) — which is how a structure travels: a typed table `\\table(tab:x) {...}`, a `figure` environment, a `tikzpicture`. Braces are welcome as long as they balance; for del, the anchor itself is proposed for removal; for sub, the anchor is proposed to become `text`. Always pass `model` (the model you run on, e.g. claude-fable-5-1) and `provider` (e.g. Anthropic): the revision is signed with your client, version and model so the author can trace who proposed what.",
+  description: "Propose a change as an ExactTeX revision (@add/@del/@sub) the author accepts or rejects in Vitela. Never edits text directly. `anchor` is exact prose to find in the file (first occurrence in live text); for add, the new text is inserted right after the anchor (placement `inline`, default), as a paragraph of its own after the anchor's line (placement `paragraph`), or as a block on its own lines (placement `block`) — which is how a structure travels: a typed table `\\table(tab:x) {...}`, a `figure` environment, a `tikzpicture`. Braces are welcome as long as they balance; for del, the anchor itself is proposed for removal; for sub, the anchor is proposed to become `text`. Always pass `model` (the model you run on, e.g. claude-fable-5-1) and `provider` (e.g. Anthropic): the revision is signed with your client, version and model so the author can trace who proposed what. The proposal is checked before it is written: an error the document does not already have refuses it, with the diagnostic — nothing is written, so fix the proposal and send it again. An advisory comes back beside the answer. `force: true` writes it anyway, for a change that only becomes valid with another one.",
   inputSchema: {
     file: z.string(),
     kind: z.enum(["add", "del", "sub"]),
@@ -195,6 +195,7 @@ server.registerTool("revision_propose", {
     text: z.string().optional(),
     message: z.string().optional(),
     placement: z.enum(["inline", "paragraph", "block"]).optional(),
+    force: z.boolean().optional(),
     model: z.string().optional(),
     provider: z.string().optional(),
   },
