@@ -156,3 +156,14 @@ server.registerTool("revisions_list", {
 
 await server.connect(new StdioServerTransport());
 process.stderr.write(`vitela-bridge: listening on ws://${HOST}:${PORT} · pairing code ${CODE}\n`);
+// The bridge lives exactly as long as the agent that started it: when the
+// agent closes its end of stdio, the socket server would keep the process
+// alive on its own, orphaned on the port. Leave with the agent.
+process.stdin.on("close", () => {
+  wss.close();
+  process.exit(0);
+});
+process.stdin.on("end", () => {
+  wss.close();
+  process.exit(0);
+});
