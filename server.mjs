@@ -187,14 +187,14 @@ server.registerTool("report", {
 }, run("report"));
 
 server.registerTool("revision_propose", {
-  description: "Propose a change as an ExactTeX revision (@add/@del/@sub) the author accepts or rejects in Vitela. Never edits text directly. `anchor` is exact prose to find in the file (first occurrence in live text); for add, the new text is inserted right after the anchor (placement `inline`, default) or as a paragraph of its own after the anchor's line (placement `paragraph`); for del, the anchor itself is proposed for removal; for sub, the anchor is proposed to become `text`. Always pass `model` (the model you run on, e.g. claude-fable-5-1) and `provider` (e.g. Anthropic): the revision is signed with your client, version and model so the author can trace who proposed what.",
+  description: "Propose a change as an ExactTeX revision (@add/@del/@sub) the author accepts or rejects in Vitela. Never edits text directly. `anchor` is exact prose to find in the file (first occurrence in live text); for add, the new text is inserted right after the anchor (placement `inline`, default), as a paragraph of its own after the anchor's line (placement `paragraph`), or as a block on its own lines (placement `block`) — which is how a structure travels: a typed table `\\table(tab:x) {...}`, a `figure` environment, a `tikzpicture`. Braces are welcome as long as they balance; for del, the anchor itself is proposed for removal; for sub, the anchor is proposed to become `text`. Always pass `model` (the model you run on, e.g. claude-fable-5-1) and `provider` (e.g. Anthropic): the revision is signed with your client, version and model so the author can trace who proposed what.",
   inputSchema: {
     file: z.string(),
     kind: z.enum(["add", "del", "sub"]),
     anchor: z.string(),
     text: z.string().optional(),
     message: z.string().optional(),
-    placement: z.enum(["inline", "paragraph"]).optional(),
+    placement: z.enum(["inline", "paragraph", "block"]).optional(),
     model: z.string().optional(),
     provider: z.string().optional(),
   },
@@ -205,6 +205,11 @@ server.registerTool("revision_propose", {
     return fail(error);
   }
 });
+
+server.registerTool("asset_put", {
+  description: "Write an image or PDF into the open project so a figure can point at it: `path` is the file name inside the project (subfolders allowed, no ..), `base64` its bytes. Only pdf, png, jpg and svg, up to 8 MB. The file appears in the author's tree at once; the figure that uses it still travels as a revision the author accepts.",
+  inputSchema: { path: z.string(), base64: z.string() },
+}, run("asset.put"));
 
 server.registerTool("revisions_list", {
   description: "Pending revisions in the open project with their authors and status.",
