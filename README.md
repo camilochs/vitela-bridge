@@ -67,7 +67,7 @@ itself. To get a new code, delete that file or set `VITELA_BRIDGE_CODE`.
 | `compile` | Compile to PDF; page count and diagnostics |
 | `claims`, `verify` | The document's external claims; verify them against the public registries and write the dated record |
 | `report` | The submission report's data |
-| `revision_propose` | Propose an addition, deletion or substitution as a revision the author accepts or rejects — prose, or a whole structure (a typed table, a figure, a TikZ picture) with `placement: "block"`; braces travel as long as they balance. Signed with the client and version (read from the MCP handshake) and the `model` and `provider` the agent states — e.g. `agent · claude-code 2.1.250 · claude-fable-5-1 (Anthropic)` — so every proposal is traceable |
+| `revision_propose` | Propose an addition, deletion or substitution as a revision the author accepts or rejects — prose, or a whole structure (a typed table, a figure, a TikZ picture) with `placement: "block"`; braces travel as long as they balance. Signed with the client and version (read from the MCP handshake) and the `model` and `provider` the agent states — e.g. `agent · claude-code 2.1.250 · claude-fable-5-1 (Anthropic)` — so every proposal is traceable. Checked before it is written: an error the document does not already have refuses the proposal and answers with the diagnostic, leaving the file untouched; an advisory travels back beside the answer; `force: true` writes it anyway |
 | `asset_put` | Write an image or PDF into the project (base64, up to 8 MB) so a proposed figure can point at it |
 | `revisions_list` | Pending revisions and their authors |
 
