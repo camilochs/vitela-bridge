@@ -10,12 +10,37 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocketServer } from "ws";
 import { randomInt } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { z } from "zod";
 
 const PORT = Number(process.env.VITELA_BRIDGE_PORT ?? 4329);
 // 127.0.0.1 by default; VITELA_BRIDGE_HOST=0.0.0.0 to reach a dev tab over the tailnet.
 const HOST = process.env.VITELA_BRIDGE_HOST ?? "127.0.0.1";
-const CODE = process.env.VITELA_BRIDGE_CODE ?? String(randomInt(100000, 999999));
+// The pairing code is stable per machine: made once, kept in the user's
+// config directory, reused on every start — so the code is asked for once
+// and the tab remembers it. VITELA_BRIDGE_CODE overrides it; deleting the
+// file makes a new one. The socket only listens on this machine, so a
+// stable code opens nothing that was not already open.
+const CODE = process.env.VITELA_BRIDGE_CODE ?? stableCode();
+function stableCode() {
+  const dir = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "vitela-bridge");
+  const file = join(dir, "code");
+  try {
+    if (existsSync(file)) {
+      const kept = readFileSync(file, "utf8").trim();
+      if (/^\d{6}$/.test(kept)) return kept;
+    }
+    const made = String(randomInt(100000, 999999));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, made + "\n", { mode: 0o600 });
+    return made;
+  } catch {
+    return String(randomInt(100000, 999999));
+  }
+}
+const PUBLIC_APP = "https://vitela.artificialfallibility.com/app";
 
 let tab = null; // the paired socket
 let nextId = 1;
@@ -104,9 +129,17 @@ function authorOf(args) {
 const server = new McpServer({ name: "vitela-bridge", version: "0.1.0" });
 
 server.registerTool("bridge_status", {
-  description: "Whether a Vitela tab is paired, and the pairing code to type in Vitela (Agent button).",
+  description: "Whether a Vitela tab is paired, the pairing code to type in Vitela (Agent button), and a link that pairs the tab by itself when opened. The code is stable on this machine, so the author needs it once; Vitela remembers it afterwards.",
   inputSchema: {},
-}, async () => text({ paired: Boolean(tab), code: CODE, port: PORT, host: HOST, ...(socketError ? { error: socketError } : {}) }));
+}, async () => text({
+  paired: Boolean(tab),
+  code: CODE,
+  link: `${PUBLIC_APP}?pair=${CODE}`,
+  localLink: `http://localhost:4326/app?pair=${CODE}`,
+  port: PORT,
+  host: HOST,
+  ...(socketError ? { error: socketError } : {}),
+}));
 
 server.registerTool("projects_list", {
   description: "The projects in the paired Vitela tab: id, name, root file, last update.",

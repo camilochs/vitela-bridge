@@ -44,19 +44,23 @@ codex mcp add vitela-bridge -- npx -y github:camilochs/vitela-bridge
 
 ## Pair
 
-1. Start your agent. The bridge starts with it and prints a six-digit code; ask the agent for it
-   (the `bridge_status` tool returns it).
-2. Open Vitela, press **Agent** in the header, type the code. The card says *Connected*.
+1. Start your agent. The bridge starts with it. Ask the agent for the pairing code once — or for the
+   pairing link (`bridge_status` returns both: `code`, and `link` of the form
+   `https://vitela.artificialfallibility.com/app?pair=123456`, which pairs the tab by itself when opened).
+2. Open Vitela, press **Agent** in the header, type the code (or open the link). The card says
+   *Connected* and closes.
 3. Work. The agent reads the project, runs the check, compiles, verifies the bibliography, and
    proposes changes you accept or reject in the margin.
 
-The code changes every time the bridge starts. A reload of the tab keeps the pairing.
+The code is stable on this machine — made once, kept in `~/.config/vitela-bridge/code`, reused on every
+start — and Vitela remembers it in the browser, so after the first time pressing **Agent** connects by
+itself. To get a new code, delete that file or set `VITELA_BRIDGE_CODE`.
 
 ## Tools
 
 | Tool | What it does in the tab |
 |---|---|
-| `bridge_status` | Whether a tab is paired, and the pairing code |
+| `bridge_status` | Whether a tab is paired, the pairing code, and the link that pairs a tab when opened |
 | `projects_list`, `project_open` | The projects in the tab; switch to one |
 | `files_list`, `file_read` | The open project's files and assets; read one |
 | `check` | The ExactTeX check: diagnostics, coverage, bibliography state |
@@ -72,7 +76,7 @@ The code changes every time the bridge starts. A reload of the tab keeps the pai
 |---|---|---|
 | `VITELA_BRIDGE_PORT` | `4329` | The local port the tab connects to |
 | `VITELA_BRIDGE_HOST` | `127.0.0.1` | Bind address. `0.0.0.0` to reach a tab on another machine of your own network (a dev server over a tailnet, for instance) |
-| `VITELA_BRIDGE_CODE` | random | Fix the pairing code (tests) |
+| `VITELA_BRIDGE_CODE` | stable per machine | Fix the pairing code; otherwise it is made once and kept in `~/.config/vitela-bridge/code` |
 
 The tab connects to the bridge on the machine that serves the page for a plain-`http` dev server, and on
 `127.0.0.1` for `localhost` and for the published site.
