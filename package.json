@@ -1,0 +1,26 @@
+{
+  "name": "vitela-bridge",
+  "version": "0.1.0",
+  "description": "The Vitela agent bridge: an MCP server that pairs with a Vitela tab so a coding agent can check, compile, verify and propose revisions — never edit text — in your project.",
+  "license": "MIT",
+  "author": "Camilo Chacón Sartori",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/camilochs/vitela-bridge.git"
+  },
+  "homepage": "https://vitela.artificialfallibility.com/agent",
+  "keywords": ["mcp", "model-context-protocol", "latex", "exacttex", "vitela", "agent"],
+  "type": "module",
+  "bin": {
+    "vitela-bridge": "server.mjs"
+  },
+  "files": ["server.mjs", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ws": "^8.21.3",
+    "zod": "^4.5.4"
+  }
+}
