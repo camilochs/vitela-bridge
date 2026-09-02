@@ -23,6 +23,12 @@ Node 20 or newer. No install step: `npx` fetches and runs it.
 claude mcp add vitela-bridge -- npx -y github:camilochs/vitela-bridge
 ```
 
+**Codex**
+
+```sh
+codex mcp add vitela-bridge -- npx -y github:camilochs/vitela-bridge
+```
+
 **Cursor, Windsurf, Zed, Claude Desktop and other MCP clients** — add to the client's MCP configuration:
 
 ```json
