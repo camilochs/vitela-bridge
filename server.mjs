@@ -235,6 +235,11 @@ server.registerTool("asset_put", {
   inputSchema: { path: z.string(), base64: z.string() },
 }, run("asset.put"));
 
+server.registerTool("revisions_prune", {
+  description: "Drop sidecar records whose construct is no longer in the text — the repair for a record left behind when a change removed prose that held another pending one. Returns the ids dropped. It never touches a record whose construct is still there.",
+  inputSchema: {},
+}, run("revisions.prune"));
+
 server.registerTool("revisions_list", {
   description: "Pending revisions in the open project with their authors and status.",
   inputSchema: {},
