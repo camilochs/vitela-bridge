@@ -235,6 +235,23 @@ server.registerTool("asset_put", {
   inputSchema: { path: z.string(), base64: z.string() },
 }, run("asset.put"));
 
+server.registerTool("page_image", {
+  description: "Look at the compiled PDF: one page as an image, rendered in the tab from the document the reader sees. Use it to judge what only the eye can judge — a table wider than its column, a figure that broke across pages, a float that landed far from its text, a caption that overflows. `page` is 1-based; `scale` 0.5 to 3 (1.5 reads well). Compile first.",
+  inputSchema: { page: z.number().optional(), scale: z.number().optional() },
+}, async (args) => {
+  try {
+    const shot = await callTab("page.image", args ?? {}, 180_000);
+    return {
+      content: [
+        { type: "text", text: `page ${shot.page} of ${shot.pages} · ${shot.width}×${shot.height}px` },
+        { type: "image", data: shot.base64, mimeType: "image/png" },
+      ],
+    };
+  } catch (error) {
+    return fail(error);
+  }
+});
+
 server.registerTool("revisions_prune", {
   description: "Drop sidecar records whose construct is no longer in the text — the repair for a record left behind when a change removed prose that held another pending one. Returns the ids dropped. It never touches a record whose construct is still there.",
   inputSchema: {},

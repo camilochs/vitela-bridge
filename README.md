@@ -70,6 +70,7 @@ itself. To get a new code, delete that file or set `VITELA_BRIDGE_CODE`.
 | `revision_propose` | Propose an addition, deletion or substitution as a revision the author accepts or rejects — prose, or a whole structure (a typed table, a figure, a TikZ picture) with `placement: "block"`; braces travel as long as they balance. Signed with the client and version (read from the MCP handshake) and the `model` and `provider` the agent states — e.g. `agent · claude-code 2.1.250 · claude-fable-5-1 (Anthropic)` — so every proposal is traceable. Checked before it is written: an error the document does not already have refuses the proposal and answers with the diagnostic, leaving the file untouched; an advisory travels back beside the answer; `force: true` writes it anyway |
 | `revision_propose_set` | Propose several edits as one change: one card, one group in the sidecar, one Accept for all of them. The check runs over the result of the whole set, and an edit that cannot be placed fails the set — nothing half-applied |
 | `asset_put` | Write an image or PDF into the project (base64, up to 8 MB) so a proposed figure can point at it |
+| `page_image` | One page of the compiled PDF as an image, so the agent can judge what only the eye can judge |
 | `revisions_prune` | Drop sidecar records whose construct is no longer in the text |
 | `revisions_list` | Pending revisions and their authors |
 
