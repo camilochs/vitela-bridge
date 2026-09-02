@@ -207,6 +207,29 @@ server.registerTool("revision_propose", {
   }
 });
 
+server.registerTool("revision_propose_set", {
+  description: "Propose a change that needs several edits as ONE revision the author accepts or rejects whole: the preamble line a figure needs and the figure itself, the removal of an old table and the arrival of its replacement, a table and the sentence that introduces it. `message` is what the author reads on the card; `edits` are the same fields `revision_propose` takes (file, kind, anchor, text, placement), applied in order, each against the text the ones before it leave. They arrive as one card in the margin, one group in the sidecar, and one row in revisions_list; Accept resolves them all in one pass, Reject removes them all. The check runs over the result of the whole set, so an edit that cannot be placed, or a set that would break the document, fails before anything is written — nothing half-applied, ever. Pass `model` and `provider` as for revision_propose; `force: true` writes past an error the set would introduce.",
+  inputSchema: {
+    message: z.string(),
+    edits: z.array(z.object({
+      file: z.string(),
+      kind: z.enum(["add", "del", "sub"]),
+      anchor: z.string(),
+      text: z.string().optional(),
+      placement: z.enum(["inline", "paragraph", "block"]).optional(),
+    })).min(2),
+    force: z.boolean().optional(),
+    model: z.string().optional(),
+    provider: z.string().optional(),
+  },
+}, async (args) => {
+  try {
+    return text(await callTab("revision.propose_set", { ...(args ?? {}), author: authorOf(args ?? {}) }));
+  } catch (error) {
+    return fail(error);
+  }
+});
+
 server.registerTool("asset_put", {
   description: "Write an image or PDF into the open project so a figure can point at it: `path` is the file name inside the project (subfolders allowed, no ..), `base64` its bytes. Only pdf, png, jpg and svg, up to 8 MB. The file appears in the author's tree at once; the figure that uses it still travels as a revision the author accepts.",
   inputSchema: { path: z.string(), base64: z.string() },
