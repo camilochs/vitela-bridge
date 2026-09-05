@@ -9,6 +9,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocketServer } from "ws";
+import { createServer as createTlsServer } from "node:https";
 import { randomInt } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -18,6 +19,15 @@ import { z } from "zod";
 const PORT = Number(process.env.VITELA_BRIDGE_PORT ?? 4329);
 // 127.0.0.1 by default; VITELA_BRIDGE_HOST=0.0.0.0 to reach a dev tab over the tailnet.
 const HOST = process.env.VITELA_BRIDGE_HOST ?? "127.0.0.1";
+// A certificate turns the socket into wss://, which is what a page served
+// over HTTPS — production, in a browser on another machine of the tailnet —
+// is allowed to reach. VITELA_BRIDGE_PUBLIC names that address (host:port)
+// so the pairing link can carry it.
+const CERT = process.env.VITELA_BRIDGE_CERT;
+const KEY = process.env.VITELA_BRIDGE_KEY;
+const PUBLIC = process.env.VITELA_BRIDGE_PUBLIC ?? "";
+const TLS = Boolean(CERT && KEY && existsSync(CERT) && existsSync(KEY));
+let socketError = null; // reported by bridge_status instead of crashing the MCP side
 // The pairing code is stable per machine: made once, kept in the user's
 // config directory, reused on every start — so the code is asked for once
 // and the tab remembers it. VITELA_BRIDGE_CODE overrides it; deleting the
@@ -46,8 +56,15 @@ let tab = null; // the paired socket
 let nextId = 1;
 const pending = new Map();
 
-const wss = new WebSocketServer({ host: HOST, port: PORT });
-let socketError = null; // reported by bridge_status instead of crashing the MCP side
+let wss;
+if (TLS) {
+  const tls = createTlsServer({ cert: readFileSync(CERT), key: readFileSync(KEY) });
+  tls.on("error", (error) => { socketError = String(error.message ?? error); process.stderr.write(`vitela-bridge: ${socketError}\n`); });
+  tls.listen(PORT, HOST);
+  wss = new WebSocketServer({ server: tls });
+} else {
+  wss = new WebSocketServer({ host: HOST, port: PORT });
+}
 wss.on("error", (error) => {
   socketError = error.code === "EADDRINUSE" ? `port ${PORT} is already in use on ${HOST} — set VITELA_BRIDGE_PORT` : String(error.message ?? error);
   process.stderr.write(`vitela-bridge: ${socketError}\n`);
@@ -134,7 +151,9 @@ server.registerTool("bridge_status", {
 }, async () => text({
   paired: Boolean(tab),
   code: CODE,
-  link: `${PUBLIC_APP}?pair=${CODE}`,
+  link: `${PUBLIC_APP}?pair=${CODE}${PUBLIC ? `&bridge=${encodeURIComponent(PUBLIC)}` : ""}`,
+  tls: TLS,
+  public: PUBLIC || null,
   localLink: `http://localhost:4326/app?pair=${CODE}`,
   port: PORT,
   host: HOST,
@@ -252,10 +271,10 @@ server.registerTool("page_image", {
   }
 });
 
-server.registerTool("sidecar_rebuild", {
-  description: "Last resort when the compiler can no longer read a file's sidecar and every Accept and Reject fails: the broken sidecar is kept in the project as <name>.xtexrev.broken, and a fresh one is written carrying the records whose constructs are still in the text. Attribution history is preserved as a file, never discarded. `file` is the document, e.g. main.xtex.",
-  inputSchema: { file: z.string().optional() },
-}, run("sidecar.rebuild"));
+server.registerTool("file_delete", {
+  description: "Remove a file the AGENT wrote by mistake — today only a `.xtexrev.broken` left behind by an earlier version of this bridge. It refuses every other path: the author's documents, bibliographies, class files and sidecars are the author's, deleted from the file tree and never by an agent.",
+  inputSchema: { path: z.string() },
+}, run("file.delete"));
 
 server.registerTool("revision_withdraw", {
   description: "Take back a proposal the agent itself made: the construct leaves the text and the document returns to what it said before — an addition's text goes, a deletion's and a substitution's original text stays — and the sidecar record goes with it. Only a revision whose author is an agent can be withdrawn; the author's own changes are the author's. Use it when a proposal was wrong, or when the compiler can no longer resolve it, instead of asking the author to repair it by hand.",
@@ -273,7 +292,7 @@ server.registerTool("revisions_list", {
 }, run("revisions.list"));
 
 await server.connect(new StdioServerTransport());
-process.stderr.write(`vitela-bridge: listening on ws://${HOST}:${PORT} · pairing code ${CODE}\n`);
+process.stderr.write(`vitela-bridge: listening on ${TLS ? "wss" : "ws"}://${HOST}:${PORT} · pairing code ${CODE}\n`);
 // The bridge lives exactly as long as the agent that started it: when the
 // agent closes its end of stdio, the socket server would keep the process
 // alive on its own, orphaned on the port. Leave with the agent.
