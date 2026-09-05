@@ -82,6 +82,34 @@ itself. To get a new code, delete that file or set `VITELA_BRIDGE_CODE`.
 | `VITELA_BRIDGE_PORT` | `4329` | The local port the tab connects to |
 | `VITELA_BRIDGE_HOST` | `127.0.0.1` | Bind address. `0.0.0.0` to reach a tab on another machine of your own network (a dev server over a tailnet, for instance) |
 | `VITELA_BRIDGE_CODE` | stable per machine | Fix the pairing code; otherwise it is made once and kept in `~/.config/vitela-bridge/code` |
+| `VITELA_BRIDGE_CERT`, `VITELA_BRIDGE_KEY` | unset | A certificate and key. When both are set the bridge listens as `wss://`, which a page served over HTTPS can reach |
+| `VITELA_BRIDGE_PUBLIC` | unset | The address (`host:port`) the tab should use for this bridge. `bridge_status` adds it to the pairing link as `&bridge=` |
+
+## From another machine
+
+A Vitela tab served over HTTPS (production, in a browser on your laptop) can only open an encrypted
+socket, and "localhost" there is the laptop, not the machine running the agent. Three things make it work
+over a tailnet:
+
+1. A certificate for the agent's machine. With Tailscale: `tailscale cert <machine>.<tailnet>.ts.net`
+   (it needs HTTPS enabled for the tailnet). Keep the two files somewhere stable.
+2. The bridge bound to the network and given the certificate, in `.mcp.json`:
+
+   ```json
+   "env": {
+     "VITELA_BRIDGE_HOST": "0.0.0.0",
+     "VITELA_BRIDGE_CERT": "/path/to/machine.tailnet.ts.net.crt",
+     "VITELA_BRIDGE_KEY": "/path/to/machine.tailnet.ts.net.key",
+     "VITELA_BRIDGE_PUBLIC": "machine.tailnet.ts.net:4329"
+   }
+   ```
+
+3. The link from `bridge_status`, opened on the laptop:
+   `https://vitela.artificialfallibility.com/app?pair=123456&bridge=machine.tailnet.ts.net:4329`.
+   The tab keeps the bridge address, so the next time the Agent button connects on its own.
+
+The certificate expires; renew it with the same command and restart the agent. If the port is already
+held by an older bridge, `bridge_status` says so: stop that one first.
 
 The tab connects to the bridge on the machine that serves the page for a plain-`http` dev server, and on
 `127.0.0.1` for `localhost` and for the published site.
