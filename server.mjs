@@ -60,7 +60,20 @@ const PUBLIC_APP = "https://vitela.artificialfallibility.com/app";
 // session to the tab of the paper it opened (project_open binds), so two
 // sessions drive two papers at once through one code. A lone session with a
 // lone tab needs no ceremony: its calls go to the only tab.
+//
+// The tab sees the sessions. The hub tells every tab which sessions are on
+// this machine and which one is bound to that tab; the author can choose
+// one from the tab (`choose`), and a session that opens a paper takes its
+// tab from whoever had it — the last to work there wins. The director:
+// "the web detects which session is working, and I choose" (2026-09-07).
+//
+// The port is never the author's problem. A session that cannot attach —
+// the process on the port is an older bridge, or hung — asks it to yield;
+// a bridge that understands hands the port over and re-attaches as a
+// client, its tabs reconnecting on their own; one that does not is a
+// vitela-bridge of an earlier version, and only such a process is ended.
 import { WebSocket } from "ws";
+import { execSync } from "node:child_process";
 
 let nextId = 1;
 const pending = new Map(); // hub: call id -> { resolve, reject, timer }
@@ -69,14 +82,57 @@ let mode = null; // "hub" | "client"
 let hubServer = null; // client: the socket to the hub
 let readyResolve;
 const ready = new Promise((r) => { readyResolve = r; });
+const STARTED = Date.now();
+
+// A name the author can recognise in the tab: the MCP client (known at the
+// handshake), when it started, and the paper it holds. The pid tells two
+// sessions of one client apart.
+const selfInfo = { id: `s${process.pid}`, name: "agent", since: STARTED, paper: null };
+function selfName() {
+  const client = typeof server !== "undefined" ? server.server.getClientVersion?.() : null;
+  return client?.name ? (client.version ? `${client.name} ${client.version}` : client.name) : "agent";
+}
 
 // HUB state
 const tabs = new Set();       // browser sockets; each carries _project and _session
-const sessions = new Set();   // { tabSock, deliver } — the hub's own session and every attached one
-const selfSession = { tabSock: null }; // this process's own MCP session
+const sessions = new Set();   // { tabSock, deliver, info } — the hub's own session and every attached one
+const selfSession = { tabSock: null, info: selfInfo }; // this process's own MCP session
 sessions.add(selfSession);
 
 function tabList() { return [...tabs].filter((t) => t.readyState === 1); }
+
+function sessionRows(forTab) {
+  return [...sessions].map((s) => ({
+    id: s.info?.id ?? "?",
+    name: s.info?.name ?? "agent",
+    since: s.info?.since ?? null,
+    paper: s.tabSock?._project ?? s.info?.paper ?? null,
+    here: Boolean(forTab && s.tabSock === forTab),
+  }));
+}
+/** Every tab learns which sessions exist and which one is bound to it. */
+function tellTabs() {
+  for (const t of tabList()) {
+    try { t.send(JSON.stringify({ type: "sessions", list: sessionRows(t) })); } catch { /* going away */ }
+  }
+}
+/** Bind a session to a tab. The tab's previous session and the session's
+ * previous tab are both released: the last to work on a paper has it. */
+function bind(session, tab) {
+  if (tab._session && tab._session !== session) tab._session.tabSock = null;
+  if (session.tabSock && session.tabSock !== tab) session.tabSock._session = null;
+  session.tabSock = tab;
+  tab._session = session;
+  if (session.info) session.info.paper = tab._project ?? session.info.paper;
+  tellTabs();
+}
+function unbind(session) {
+  if (session.tabSock) {
+    if (session.tabSock._session === session) session.tabSock._session = null;
+    session.tabSock = null;
+  }
+  tellTabs();
+}
 
 /** Which tab a session's call goes to (option 1: bound by the paper it
  * opened). A bound tab wins; project_open picks the tab already showing that
@@ -112,17 +168,19 @@ function askTab(target, tool, args, timeoutMs) {
 }
 
 /** Run a tool for a session against the right tab, and remember the binding
- * a project_open establishes. Used by the hub for its own session and for
- * every attached one. */
+ * a project_open establishes — or that working on a lone tab establishes.
+ * Used by the hub for its own session and for every attached one. */
 async function routeForSession(session, tool, args, timeoutMs) {
   const target = pickTab(session, tool, args);
   const value = await askTab(target, tool, args ?? {}, timeoutMs);
-  if (tool === "project.open") { session.tabSock = target; target._session = session; target._project = args?.id ?? target._project; }
+  if (tool === "project.open") { target._project = args?.id ?? target._project; bind(session, target); }
+  else if (tool !== "projects.list" && !session.tabSock) bind(session, target);
   return value;
 }
 
 function startHub(wss) {
   mode = "hub";
+  selfInfo.name = selfName();
   wss.on("connection", (socket) => {
     let role = null; // "tab" | "session"
     let session = null;
@@ -132,17 +190,40 @@ function startHub(wss) {
         if (msg.type === "pair" && String(msg.code) === CODE) {
           role = "tab"; socket._project = msg.project ?? null; socket._session = null; tabs.add(socket);
           socket.send(JSON.stringify({ type: "paired" }));
+          // A session that had opened this paper takes the tab back: after a
+          // handover the tabs reconnect on their own and find their session.
+          const owner = [...sessions].find((s) => !s.tabSock && s.info?.paper && s.info.paper === socket._project);
+          if (owner) bind(owner, socket); else tellTabs();
         } else if (msg.type === "attach" && String(msg.code) === CODE) {
-          role = "session"; session = { tabSock: null, deliver: (m) => socket.send(JSON.stringify(m)) }; sessions.add(session);
+          role = "session";
+          session = {
+            tabSock: null,
+            deliver: (m) => socket.send(JSON.stringify(m)),
+            info: { id: msg.id ?? `s${nextId++}`, name: msg.name ?? "agent", since: msg.since ?? Date.now(), paper: msg.paper ?? null },
+          };
+          sessions.add(session);
           socket.send(JSON.stringify({ type: "attached" }));
+          const tab = session.info.paper ? tabList().find((t) => t._project === session.info.paper && !t._session) : null;
+          if (tab) bind(session, tab); else tellTabs();
+        } else if (msg.type === "yield" && String(msg.code) === CODE) {
+          // The port goes to the session asking for it; this one follows.
+          socket.send(JSON.stringify({ type: "yielded" }));
+          handOver();
         } else {
           socket.send(JSON.stringify({ type: "refused" })); socket.close();
         }
         return;
       }
       if (role === "tab") {
-        if (msg.type === "project") socket._project = msg.project ?? null;
-        else if (msg.type === "result" && pending.has(msg.id)) {
+        if (msg.type === "project") {
+          socket._project = msg.project ?? null;
+          if (socket._session?.info) socket._session.info.paper = socket._project;
+          tellTabs();
+        } else if (msg.type === "choose") {
+          // The author picks, from the tab, which session works here.
+          const chosen = [...sessions].find((s) => s.info?.id === msg.session);
+          if (chosen) bind(chosen, socket); else if (socket._session) unbind(socket._session);
+        } else if (msg.type === "result" && pending.has(msg.id)) {
           const { resolve, reject, timer } = pending.get(msg.id); clearTimeout(timer); pending.delete(msg.id);
           if (msg.ok) resolve(msg.value); else reject(new Error(msg.error ?? "the tab reported an error"));
         }
@@ -156,36 +237,69 @@ function startHub(wss) {
       }
     });
     socket.on("close", () => {
-      if (role === "tab") { tabs.delete(socket); for (const s of sessions) if (s.tabSock === socket) s.tabSock = null; }
-      else if (session) sessions.delete(session);
+      if (role === "tab") { tabs.delete(socket); for (const s of sessions) if (s.tabSock === socket) s.tabSock = null; tellTabs(); }
+      else if (session) { unbind(session); sessions.delete(session); tellTabs(); }
     });
   });
   readyResolve();
 }
 
+/** The hub steps down: the port is released and this process re-attaches
+ * to whoever takes it. Its own binding survives by paper; the tabs close
+ * and reconnect on their own to the new hub. */
+function handOver() {
+  selfInfo.paper = selfSession.tabSock?._project ?? selfInfo.paper;
+  for (const t of tabList()) { try { t.close(); } catch { /* going */ } }
+  try { if (wss) wss.close(); } catch { /* already down */ }
+  try { if (tlsServer) tlsServer.close(); } catch { /* already down */ }
+  wss = null; tlsServer = null;
+  tabs.clear();
+  for (const s of [...sessions]) if (s !== selfSession) sessions.delete(s);
+  selfSession.tabSock = null;
+  mode = null;
+  setTimeout(() => startClient(), 400);
+}
+
+/** Attach to the hub, and keep following the port: a hub that hands over
+ * or ends is replaced, and this session attaches to the next one. When
+ * nothing answers, or the code is refused, take the port (takeOver). */
 function startClient() {
   mode = "client";
   const scheme = TLS ? "wss" : "ws";
   const url = `${scheme}://127.0.0.1:${PORT}`;
   const cwaiters = new Map(); // cid -> { resolve, reject, timer }
+  let attached = false;
   const open = () => {
-    hubServer = new WebSocket(url, { rejectUnauthorized: false });
-    hubServer.on("open", () => { hubServer.send(JSON.stringify({ type: "attach", code: CODE })); });
-    hubServer.on("message", (raw) => {
+    let answered = false;
+    const ws = new WebSocket(url, { rejectUnauthorized: false });
+    hubServer = ws;
+    const silence = setTimeout(() => { if (!answered && mode === "client") { try { ws.close(); } catch { /* down */ } takeOver(); } }, 2500);
+    ws.on("open", () => { ws.send(JSON.stringify({ type: "attach", code: CODE, id: selfInfo.id, name: selfName(), since: STARTED, paper: selfInfo.paper })); });
+    ws.on("message", (raw) => {
       let msg; try { msg = JSON.parse(String(raw)); } catch { return; }
-      if (msg.type === "attached") { readyResolve(); return; }
-      if (msg.type === "refused") { socketError = "the shared bridge refused this code"; return; }
+      if (msg.type === "attached") { answered = true; attached = true; clearTimeout(silence); socketError = null; readyResolve(); return; }
+      if (msg.type === "refused") { answered = true; clearTimeout(silence); socketError = "the shared bridge refused this code"; try { ws.close(); } catch { /* down */ } takeOver(); return; }
       if (msg.type === "call-result" && cwaiters.has(msg.cid)) {
         const { resolve, reject, timer } = cwaiters.get(msg.cid); clearTimeout(timer); cwaiters.delete(msg.cid);
         if (msg.ok) resolve(msg.value); else reject(new Error(msg.error ?? "the shared bridge reported an error"));
       }
     });
-    hubServer.on("close", () => { hubServer = null; });
-    hubServer.on("error", (e) => { socketError = String(e?.message ?? e); });
+    ws.on("close", () => {
+      if (hubServer === ws) hubServer = null;
+      clearTimeout(silence);
+      // The hub went away (it handed over, or its session ended): follow the
+      // port — attach again, or take it when nothing listens.
+      if (mode === "client" && attached) { attached = false; setTimeout(() => { if (mode === "client") open(); }, 700); }
+    });
+    ws.on("error", (e) => {
+      clearTimeout(silence);
+      socketError = String(e?.message ?? e);
+      if (mode === "client" && !answered) takeOver();
+    });
   };
   open();
   clientCall = (tool, args, timeoutMs) => new Promise((resolve, reject) => {
-    if (!hubServer || hubServer.readyState !== 1) return reject(new Error("the shared bridge is not reachable"));
+    if (!hubServer || hubServer.readyState !== 1 || !attached) return reject(new Error(socketError ?? "the shared bridge is not reachable yet — try again in a moment"));
     const cid = nextId++;
     const timer = setTimeout(() => { cwaiters.delete(cid); reject(new Error(`the shared bridge did not answer ${tool} within ${timeoutMs / 1000}s`)); }, timeoutMs + 5000);
     cwaiters.set(cid, { resolve, reject, timer });
@@ -193,21 +307,70 @@ function startClient() {
   });
 }
 
+/** Take the port. Ask the occupant to yield: a bridge of this version hands
+ * over and follows; one that refuses or answers nothing is an older
+ * vitela-bridge, and only such a process is ended. Then bind. */
+let takingOver = false;
+function takeOver() {
+  if (takingOver || mode === "hub") return;
+  takingOver = true;
+  const finish = () => { mode = null; hubServer = null; setTimeout(bringUp, 600); };
+  const scheme = TLS ? "wss" : "ws";
+  let done = false;
+  const ws = new WebSocket(`${scheme}://127.0.0.1:${PORT}`, { rejectUnauthorized: false });
+  const settle = (ended) => {
+    if (done) return;
+    done = true;
+    clearTimeout(giveUp);
+    try { ws.close(); } catch { /* down */ }
+    if (ended) endOldBridge();
+    finish();
+  };
+  const giveUp = setTimeout(() => settle(true), 2000);
+  ws.on("open", () => ws.send(JSON.stringify({ type: "yield", code: CODE })));
+  ws.on("message", (raw) => {
+    let msg; try { msg = JSON.parse(String(raw)); } catch { return; }
+    if (msg.type === "yielded") settle(false);
+    else if (msg.type === "refused") settle(true);
+  });
+  ws.on("error", () => settle(true));
+}
+/** End the process on the port — only when it is a vitela-bridge of ours. */
+function endOldBridge() {
+  try {
+    const pids = execSync(`lsof -t -iTCP:${PORT} -sTCP:LISTEN`, { stdio: ["ignore", "pipe", "ignore"] }).toString().split(/\s+/).filter(Boolean);
+    for (const pid of pids) {
+      if (Number(pid) === process.pid) continue;
+      const cmd = execSync(`ps -o command= -p ${pid}`, { stdio: ["ignore", "pipe", "ignore"] }).toString();
+      if (/vitela-bridge/.test(cmd) && /server\.mjs/.test(cmd)) {
+        process.kill(Number(pid), "SIGTERM");
+        process.stderr.write(`vitela-bridge: an older bridge held :${PORT} (pid ${pid}); it was ended and this session takes the port\n`);
+      }
+    }
+  } catch { /* no lsof here, or nothing to end */ }
+}
+
 let clientCall = null;
 
 let wss = null;
+let tlsServer = null;
+let bindAttempts = 0;
 function bringUp() {
+  // Right after a takeover the port may take a moment to free: try a few
+  // times before settling for attaching.
+  const busy = () => { if (takingOver && ++bindAttempts <= 4) setTimeout(bringUp, 700); else { takingOver = false; bindAttempts = 0; startClient(); } };
+  const up = () => { takingOver = false; bindAttempts = 0; };
   if (TLS) {
     const tls = createTlsServer({ cert: readFileSync(CERT), key: readFileSync(KEY) });
     tls.on("error", (error) => {
-      if (error.code === "EADDRINUSE") { startClient(); } else { socketError = String(error.message ?? error); process.stderr.write(`vitela-bridge: ${socketError}\n`); }
+      if (error.code === "EADDRINUSE") busy(); else { socketError = String(error.message ?? error); process.stderr.write(`vitela-bridge: ${socketError}\n`); }
     });
-    tls.listen(PORT, HOST, () => { wss = new WebSocketServer({ server: tls }); startHub(wss); });
+    tls.listen(PORT, HOST, () => { up(); tlsServer = tls; wss = new WebSocketServer({ server: tls }); startHub(wss); });
   } else {
     const s = new WebSocketServer({ host: HOST, port: PORT });
-    s.on("listening", () => { wss = s; startHub(s); });
+    s.on("listening", () => { up(); wss = s; startHub(s); });
     s.on("error", (error) => {
-      if (error.code === "EADDRINUSE") { startClient(); }
+      if (error.code === "EADDRINUSE") busy();
       else { socketError = String(error.message ?? error); process.stderr.write(`vitela-bridge: ${socketError}\n`); }
     });
   }
@@ -249,7 +412,23 @@ function authorOf(args) {
   return parts.join(" \u00b7 ");
 }
 
-const server = new McpServer({ name: "vitela-bridge", version: "0.1.0" });
+// What an agent reads when it connects: how a paper is edited through
+// cards. Written after a day in which a paper was cut to a demo with
+// fifteen cards where two would do, and every limit of a card was found by
+// hitting it (2026-09-07). The rules live here so no author has to say them.
+const EDITING_PROTOCOL = `How to edit a paper in Vitela (read this before proposing).
+
+The author works in the review margin: every proposal is a CARD they accept, reject or reply to. Cards are the unit of the author's attention, so:
+
+1. Few, large cards. One card per block the author reads as a unit: a section, a paragraph, the front matter, the whole body before a figure. Never a burst of small cards for one change. To cut or rewrite a paper: one substitution for everything before the figure, one for everything after it (a figure's arrows keep it out of a substitution). Never one card per sentence.
+2. A set when several pieces are ONE change (revision_propose_set): one card, one Accept. Use it when the pieces only make sense together (a preamble line and the figure that needs it; the front matter and the body). Do not use it to bundle unrelated edits.
+3. Anchor on exact live text. An anchor is prose as it stands in the file, first occurrence; one that lies inside a pending card is refused — withdraw or wait.
+4. What a card cannot carry, and what to do instead: a bare % on the LAST line of a piece (end the piece a line earlier, or escape it as \\%); a -> inside a substitution (cut the piece before and after the figure, or send a deletion and an addition as one set); braces that do not balance (cut where they close); an anchor inside a command's argument or a braced group (propose the enclosing block whole, or pass force: true when the cut must start there). Each refusal says what to do; follow it once, do not iterate blindly.
+5. Pages, length and errors are measured in Vitela: call compile after the author accepts, read pages and errors. Do not compile elsewhere before proposing.
+6. The author's reply on a card is feedback: revisions_list carries it as notes. Withdraw the card and propose again, improved. Never repeat a refused proposal unchanged.
+7. Never write text: read, check, compile, propose. The document changes only when the author accepts.`;
+
+const server = new McpServer({ name: "vitela-bridge", version: "0.1.0" }, { instructions: EDITING_PROTOCOL });
 
 server.registerTool("bridge_status", {
   description: "Whether a Vitela tab is paired, the pairing code to type in Vitela (Agent button), and a link that pairs the tab by itself when opened. The code is stable on this machine, so the author needs it once; Vitela remembers it afterwards.",
@@ -260,6 +439,8 @@ server.registerTool("bridge_status", {
     paired: mode === "hub" ? tabCount() > 0 : Boolean(hubServer && hubServer.readyState === 1),
     role: mode === "client" ? "attached to the shared bridge on this machine" : "the shared bridge",
     tabs: mode === "hub" ? tabCount() : undefined,
+    sessions: mode === "hub" ? sessionRows(null).map((r) => ({ id: r.id, name: r.name, paper: r.paper })) : undefined,
+    me: selfInfo.id,
     code: CODE,
     link: `${PUBLIC_APP}?pair=${CODE}${PUBLIC ? `&bridge=${encodeURIComponent(PUBLIC)}` : ""}`,
     tls: TLS,
@@ -317,7 +498,7 @@ server.registerTool("report", {
 }, run("report"));
 
 server.registerTool("revision_propose", {
-  description: "Propose a change as an ExactTeX revision (@add/@del/@sub) the author accepts or rejects in Vitela. Never edits text directly. The tab rehearses the accept and the reject of every proposal before writing it and refuses one the compiler cannot resolve — a bare `%` (a TeX comment) in the text, a `->` in either half of a substitution — with nothing written; escape a percent as `\\%`. `file` must be an .xtex, .tex or .bib source: a .cls, a .sty or a verification record cannot carry a revision and the tab refuses it. Also refused at the door, nothing written: an anchor inside a command's argument (propose the enclosing block whole — a caption, a figure), and a space right after a macro's opening brace (`\\rfive{ and}`: TeX drops that space and the words glue; put the space before the macro). `anchor` is exact prose to find in the file (first occurrence in live text); for add, the new text is inserted right after the anchor (placement `inline`, default), as a paragraph of its own after the anchor's line (placement `paragraph`), or as a block on its own lines (placement `block`) — which is how a structure travels: a typed table `\\table(tab:x) {...}`, a `figure` environment, a `tikzpicture`. Braces are welcome as long as they balance; for del, the anchor itself is proposed for removal; for sub, the anchor is proposed to become `text`. Always pass `model` (the model you run on, e.g. claude-fable-5-1) and `provider` (e.g. Anthropic): the revision is signed with your client, version and model so the author can trace who proposed what. The proposal is checked before it is written: an error the document does not already have refuses it, with the diagnostic — nothing is written, so fix the proposal and send it again. An advisory comes back beside the answer. `force: true` writes it anyway, for a change that only becomes valid with another one.",
+  description: "Propose a change as an ExactTeX revision (@add/@del/@sub) the author accepts or rejects in Vitela as ONE card. Never edits text directly. Granularity is the rule the author feels most: one card per block they read as a unit (a paragraph, a section, the front matter, everything before or after a figure) — never a burst of small cards, never one per sentence; a cut or rewrite of a paper is two substitutions, one before the figure and one after it. The tab rehearses the accept and the reject of every proposal before writing it and refuses what the compiler cannot resolve, with nothing written and a message that says what to do instead: a bare `%` on the LAST line of a piece (end the piece a line earlier, or escape it as `\\%` — a comment line inside a long piece is fine), a `->` in either half of a substitution (cut the piece around the figure, or send a deletion and an addition as one set), braces that do not balance (cut where they close). `file` must be an .xtex, .tex or .bib source: a .cls, a .sty or a verification record cannot carry a revision and the tab refuses it. Also refused at the door, nothing written: an anchor inside a command's argument or a braced group (propose the enclosing block whole — a caption, a figure — or pass `force: true` when the cut must start there), and a space right after a macro's opening brace (`\\rfive{ and}`: TeX drops that space and the words glue; put the space before the macro). `anchor` is exact prose to find in the file (first occurrence in live text); for add, the new text is inserted right after the anchor (placement `inline`, default), as a paragraph of its own after the anchor's line (placement `paragraph`), or as a block on its own lines (placement `block`) — which is how a structure travels: a typed table `\\table(tab:x) {...}`, a `figure` environment, a `tikzpicture`. Braces are welcome as long as they balance; for del, the anchor itself is proposed for removal; for sub, the anchor is proposed to become `text`. Always pass `model` (the model you run on, e.g. claude-fable-5-1) and `provider` (e.g. Anthropic): the revision is signed with your client, version and model so the author can trace who proposed what. The proposal is checked before it is written: an error the document does not already have refuses it, with the diagnostic — nothing is written, so fix the proposal and send it again. An advisory comes back beside the answer. `force: true` writes it anyway, for a change that only becomes valid with another one.",
   inputSchema: {
     file: z.string(),
     kind: z.enum(["add", "del", "sub"]),
@@ -338,7 +519,7 @@ server.registerTool("revision_propose", {
 });
 
 server.registerTool("revision_propose_set", {
-  description: "Propose a change that needs several edits as ONE revision the author accepts or rejects whole: the preamble line a figure needs and the figure itself, the removal of an old table and the arrival of its replacement, a table and the sentence that introduces it. `message` is what the author reads on the card; `edits` are the same fields `revision_propose` takes (file, kind, anchor, text, placement), applied in order, each against the text the ones before it leave. They arrive as one card in the margin, one group in the sidecar, and one row in revisions_list; Accept resolves them all in one pass, Reject removes them all. The check runs over the result of the whole set, so an edit that cannot be placed, or a set that would break the document, fails before anything is written — nothing half-applied, ever. Pass `model` and `provider` as for revision_propose; `force: true` writes past an error the set would introduce.",
+  description: "Propose a change that needs several edits as ONE revision the author accepts or rejects whole: the preamble line a figure needs and the figure itself, the removal of an old table and the arrival of its replacement, a table and the sentence that introduces it. `message` is what the author reads on the card; `edits` are the same fields `revision_propose` takes (file, kind, anchor, text, placement), applied in order, each against the text the ones before it leave. They arrive as one card in the margin, one group in the sidecar, and one row in revisions_list; Accept resolves them all in one pass, Reject removes them all. The check runs over the result of the whole set, so an edit that cannot be placed, or a set that would break the document, fails before anything is written — nothing half-applied, ever. Keep the pieces few and large (see revision_propose): a set is one change in several places, not a burst of small edits. Pass `model` and `provider` as for revision_propose; `force: true` reaches every piece — it writes past an error the set would introduce, and lets a piece start inside a braced group when the cut must fall there.",
   inputSchema: {
     message: z.string(),
     edits: z.array(z.object({
@@ -417,6 +598,7 @@ if (mode === "client") {
 // alive on its own, orphaned on the port. Leave with the agent.
 function leave() {
   try { if (wss) wss.close(); } catch { /* already down */ }
+  try { if (tlsServer) tlsServer.close(); } catch { /* already down */ }
   try { if (hubServer) hubServer.close(); } catch { /* already down */ }
   process.exit(0);
 }

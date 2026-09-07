@@ -74,6 +74,17 @@ sessions can drive two papers at once, with no ports or codes to juggle.
 bridge holds. The bridge lives with the session that started it: if that session ends, an attached
 session loses it and must be restarted.
 
+## Editing through cards
+
+The bridge tells the agent how to edit when it connects (the MCP server's instructions), and every refusal says what to do instead. The rules, for a human reader:
+
+1. **Few, large cards.** One card per block the author reads as a unit: a paragraph, a section, the front matter, everything before or after a figure. Never a burst of small cards for one change; never one per sentence. A cut or rewrite of a paper is two substitutions, one before the figure and one after it.
+2. **A set when several pieces are one change** (`revision_propose_set`): one card, one Accept. Not a way to bundle unrelated edits.
+3. **Anchor on exact live text**, first occurrence; an anchor inside a pending card is refused.
+4. **What a card cannot carry**, and the way round: a bare `%` on the last line of a piece (end the piece a line earlier, or escape it as `\%` — a comment line inside a long piece is fine); a `->` inside a substitution (cut the piece around the figure, or send a deletion and an addition as one set); braces that do not balance (cut where they close); an anchor inside a command's argument or a braced group (propose the enclosing block whole, or `force: true` when the cut must start there — force reaches every piece of a set).
+5. **Pages and errors are measured in Vitela**: `compile` after the author accepts. Nothing is compiled elsewhere first.
+6. **A reply on a card is feedback**: `revisions_list` carries it as `notes`; withdraw and propose again, improved.
+
 ## Tools
 
 | Tool | What it does in the tab |
