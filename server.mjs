@@ -398,7 +398,7 @@ server.registerTool("revisions_prune", {
 }, run("revisions.prune"));
 
 server.registerTool("revisions_list", {
-  description: "Pending revisions in the open project with their authors and status.",
+  description: "Pending revisions in the open project with their authors and status. Each row carries any `notes` the author left on that card (the Reply button writes them): read them as feedback and RE-PROPOSE the change improved — withdraw the old proposal (revision_withdraw) and propose a better one that answers the note.",
   inputSchema: {},
 }, run("revisions.list"));
 
