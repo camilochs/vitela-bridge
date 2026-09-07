@@ -293,6 +293,13 @@ server.registerTool("revisions_list", {
 
 await server.connect(new StdioServerTransport());
 process.stderr.write(`vitela-bridge: listening on ${TLS ? "wss" : "ws"}://${HOST}:${PORT} · pairing code ${CODE}\n`);
+// The ready-to-open link that pairs a tab to THIS bridge — copy it into a
+// new browser tab. A second session on another paper just needs its own
+// VITELA_BRIDGE_PORT and VITELA_BRIDGE_CODE; each tab keeps its own bridge.
+{
+  const dest = PUBLIC || `127.0.0.1:${PORT}`;
+  process.stderr.write(`vitela-bridge: pair a tab -> ${PUBLIC_APP}?pair=${CODE}&bridge=${encodeURIComponent(dest)}\n`);
+}
 // The bridge lives exactly as long as the agent that started it: when the
 // agent closes its end of stdio, the socket server would keep the process
 // alive on its own, orphaned on the port. Leave with the agent.
