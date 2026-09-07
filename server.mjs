@@ -52,70 +52,176 @@ function stableCode() {
 }
 const PUBLIC_APP = "https://vitela.artificialfallibility.com/app";
 
-let tab = null; // the paired socket
+// ── Transport ────────────────────────────────────────────────────────────
+// One machine runs ONE shared bridge (the "hub") on the port, and every
+// Vitela tab pairs with it — with the same code, whatever paper it holds.
+// A second agent session cannot bind the port, so it attaches to the hub as
+// a client and its tool calls are relayed there. The hub routes each
+// session to the tab of the paper it opened (project_open binds), so two
+// sessions drive two papers at once through one code. A lone session with a
+// lone tab needs no ceremony: its calls go to the only tab.
+import { WebSocket } from "ws";
+
 let nextId = 1;
-const pending = new Map();
+const pending = new Map(); // hub: call id -> { resolve, reject, timer }
 
-let wss;
-if (TLS) {
-  const tls = createTlsServer({ cert: readFileSync(CERT), key: readFileSync(KEY) });
-  tls.on("error", (error) => { socketError = String(error.message ?? error); process.stderr.write(`vitela-bridge: ${socketError}\n`); });
-  tls.listen(PORT, HOST);
-  wss = new WebSocketServer({ server: tls });
-} else {
-  wss = new WebSocketServer({ host: HOST, port: PORT });
+let mode = null; // "hub" | "client"
+let hubServer = null; // client: the socket to the hub
+let readyResolve;
+const ready = new Promise((r) => { readyResolve = r; });
+
+// HUB state
+const tabs = new Set();       // browser sockets; each carries _project and _session
+const sessions = new Set();   // { tabSock, deliver } — the hub's own session and every attached one
+const selfSession = { tabSock: null }; // this process's own MCP session
+sessions.add(selfSession);
+
+function tabList() { return [...tabs].filter((t) => t.readyState === 1); }
+
+/** Which tab a session's call goes to (option 1: bound by the paper it
+ * opened). A bound tab wins; project_open picks the tab already showing that
+ * paper, else a free tab; a lone tab serves an unbound session; more than
+ * one tab and no binding asks the session to name its paper. */
+function pickTab(session, tool, args) {
+  const list = tabList();
+  if (session.tabSock && tabs.has(session.tabSock) && session.tabSock.readyState === 1) return session.tabSock;
+  if (list.length === 0) throw new Error(`no Vitela tab is paired — open Vitela, press Agent, enter the code ${CODE}`);
+  if (tool === "project.open") {
+    const id = args?.id;
+    return (
+      list.find((t) => t._project === id && !t._session) ||
+      list.find((t) => t._project === id) ||
+      list.find((t) => !t._session) ||
+      list[0]
+    );
+  }
+  // The project list is the same in every tab (one browser store), so an
+  // unbound session may read it from any tab without claiming one.
+  if (tool === "projects.list") return list[0];
+  if (list.length === 1) return list[0];
+  throw new Error("more than one Vitela tab is open — open your paper first with project_open(id); that binds this session to its tab");
 }
-wss.on("error", (error) => {
-  socketError = error.code === "EADDRINUSE" ? `port ${PORT} is already in use on ${HOST} — set VITELA_BRIDGE_PORT` : String(error.message ?? error);
-  process.stderr.write(`vitela-bridge: ${socketError}\n`);
-});
-wss.on("connection", (socket) => {
-  let paired = false;
-  socket.on("message", (raw) => {
-    let msg;
-    try {
-      msg = JSON.parse(String(raw));
-    } catch {
-      return;
-    }
-    if (!paired) {
-      if (msg.type === "pair" && String(msg.code) === CODE) {
-        paired = true;
-        if (tab && tab !== socket) tab.close();
-        tab = socket;
-        socket.send(JSON.stringify({ type: "paired" }));
-      } else {
-        socket.send(JSON.stringify({ type: "refused" }));
-        socket.close();
-      }
-      return;
-    }
-    if (msg.type === "result" && pending.has(msg.id)) {
-      const { resolve, reject, timer } = pending.get(msg.id);
-      clearTimeout(timer);
-      pending.delete(msg.id);
-      if (msg.ok) resolve(msg.value);
-      else reject(new Error(msg.error ?? "the tab reported an error"));
-    }
-  });
-  socket.on("close", () => {
-    if (tab === socket) tab = null;
-  });
-});
 
-function callTab(tool, args, timeoutMs = 120_000) {
-  if (socketError) return Promise.reject(new Error(socketError));
-  if (!tab) return Promise.reject(new Error("no Vitela tab is paired — open Vitela, press Agent, enter the code " + CODE));
+function askTab(target, tool, args, timeoutMs) {
   const id = nextId++;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pending.delete(id);
-      reject(new Error(`the tab did not answer ${tool} within ${timeoutMs / 1000}s`));
-    }, timeoutMs);
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`the tab did not answer ${tool} within ${timeoutMs / 1000}s`)); }, timeoutMs);
     pending.set(id, { resolve, reject, timer });
-    tab.send(JSON.stringify({ type: "call", id, tool, args }));
+    target.send(JSON.stringify({ type: "call", id, tool, args }));
   });
 }
+
+/** Run a tool for a session against the right tab, and remember the binding
+ * a project_open establishes. Used by the hub for its own session and for
+ * every attached one. */
+async function routeForSession(session, tool, args, timeoutMs) {
+  const target = pickTab(session, tool, args);
+  const value = await askTab(target, tool, args ?? {}, timeoutMs);
+  if (tool === "project.open") { session.tabSock = target; target._session = session; target._project = args?.id ?? target._project; }
+  return value;
+}
+
+function startHub(wss) {
+  mode = "hub";
+  wss.on("connection", (socket) => {
+    let role = null; // "tab" | "session"
+    let session = null;
+    socket.on("message", (raw) => {
+      let msg; try { msg = JSON.parse(String(raw)); } catch { return; }
+      if (!role) {
+        if (msg.type === "pair" && String(msg.code) === CODE) {
+          role = "tab"; socket._project = msg.project ?? null; socket._session = null; tabs.add(socket);
+          socket.send(JSON.stringify({ type: "paired" }));
+        } else if (msg.type === "attach" && String(msg.code) === CODE) {
+          role = "session"; session = { tabSock: null, deliver: (m) => socket.send(JSON.stringify(m)) }; sessions.add(session);
+          socket.send(JSON.stringify({ type: "attached" }));
+        } else {
+          socket.send(JSON.stringify({ type: "refused" })); socket.close();
+        }
+        return;
+      }
+      if (role === "tab") {
+        if (msg.type === "project") socket._project = msg.project ?? null;
+        else if (msg.type === "result" && pending.has(msg.id)) {
+          const { resolve, reject, timer } = pending.get(msg.id); clearTimeout(timer); pending.delete(msg.id);
+          if (msg.ok) resolve(msg.value); else reject(new Error(msg.error ?? "the tab reported an error"));
+        }
+        return;
+      }
+      // role === "session": relay a call to the right tab and answer back
+      if (msg.type === "call") {
+        routeForSession(session, msg.tool, msg.args, msg.timeout ?? 120_000)
+          .then((value) => session.deliver({ type: "call-result", cid: msg.cid, ok: true, value }))
+          .catch((error) => session.deliver({ type: "call-result", cid: msg.cid, ok: false, error: String(error?.message ?? error) }));
+      }
+    });
+    socket.on("close", () => {
+      if (role === "tab") { tabs.delete(socket); for (const s of sessions) if (s.tabSock === socket) s.tabSock = null; }
+      else if (session) sessions.delete(session);
+    });
+  });
+  readyResolve();
+}
+
+function startClient() {
+  mode = "client";
+  const scheme = TLS ? "wss" : "ws";
+  const url = `${scheme}://127.0.0.1:${PORT}`;
+  const cwaiters = new Map(); // cid -> { resolve, reject, timer }
+  const open = () => {
+    hubServer = new WebSocket(url, { rejectUnauthorized: false });
+    hubServer.on("open", () => { hubServer.send(JSON.stringify({ type: "attach", code: CODE })); });
+    hubServer.on("message", (raw) => {
+      let msg; try { msg = JSON.parse(String(raw)); } catch { return; }
+      if (msg.type === "attached") { readyResolve(); return; }
+      if (msg.type === "refused") { socketError = "the shared bridge refused this code"; return; }
+      if (msg.type === "call-result" && cwaiters.has(msg.cid)) {
+        const { resolve, reject, timer } = cwaiters.get(msg.cid); clearTimeout(timer); cwaiters.delete(msg.cid);
+        if (msg.ok) resolve(msg.value); else reject(new Error(msg.error ?? "the shared bridge reported an error"));
+      }
+    });
+    hubServer.on("close", () => { hubServer = null; });
+    hubServer.on("error", (e) => { socketError = String(e?.message ?? e); });
+  };
+  open();
+  clientCall = (tool, args, timeoutMs) => new Promise((resolve, reject) => {
+    if (!hubServer || hubServer.readyState !== 1) return reject(new Error("the shared bridge is not reachable"));
+    const cid = nextId++;
+    const timer = setTimeout(() => { cwaiters.delete(cid); reject(new Error(`the shared bridge did not answer ${tool} within ${timeoutMs / 1000}s`)); }, timeoutMs + 5000);
+    cwaiters.set(cid, { resolve, reject, timer });
+    hubServer.send(JSON.stringify({ type: "call", cid, tool, args, timeout: timeoutMs }));
+  });
+}
+
+let clientCall = null;
+
+let wss = null;
+function bringUp() {
+  if (TLS) {
+    const tls = createTlsServer({ cert: readFileSync(CERT), key: readFileSync(KEY) });
+    tls.on("error", (error) => {
+      if (error.code === "EADDRINUSE") { startClient(); } else { socketError = String(error.message ?? error); process.stderr.write(`vitela-bridge: ${socketError}\n`); }
+    });
+    tls.listen(PORT, HOST, () => { wss = new WebSocketServer({ server: tls }); startHub(wss); });
+  } else {
+    const s = new WebSocketServer({ host: HOST, port: PORT });
+    s.on("listening", () => { wss = s; startHub(s); });
+    s.on("error", (error) => {
+      if (error.code === "EADDRINUSE") { startClient(); }
+      else { socketError = String(error.message ?? error); process.stderr.write(`vitela-bridge: ${socketError}\n`); }
+    });
+  }
+}
+bringUp();
+
+async function callTab(tool, args, timeoutMs = 120_000) {
+  if (socketError && mode !== "hub") return Promise.reject(new Error(socketError));
+  await ready;
+  if (mode === "client") return clientCall(tool, args ?? {}, timeoutMs);
+  return routeForSession(selfSession, tool, args ?? {}, timeoutMs);
+}
+
+function tabCount() { return tabList().length; }
 
 const text = (value) => ({ content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] });
 const fail = (error) => ({ content: [{ type: "text", text: `error: ${error.message ?? error}` }], isError: true });
@@ -148,17 +254,22 @@ const server = new McpServer({ name: "vitela-bridge", version: "0.1.0" });
 server.registerTool("bridge_status", {
   description: "Whether a Vitela tab is paired, the pairing code to type in Vitela (Agent button), and a link that pairs the tab by itself when opened. The code is stable on this machine, so the author needs it once; Vitela remembers it afterwards.",
   inputSchema: {},
-}, async () => text({
-  paired: Boolean(tab),
-  code: CODE,
-  link: `${PUBLIC_APP}?pair=${CODE}${PUBLIC ? `&bridge=${encodeURIComponent(PUBLIC)}` : ""}`,
-  tls: TLS,
-  public: PUBLIC || null,
-  localLink: `http://localhost:4326/app?pair=${CODE}`,
-  port: PORT,
-  host: HOST,
-  ...(socketError ? { error: socketError } : {}),
-}));
+}, async () => {
+  await Promise.race([ready, new Promise((r) => setTimeout(r, 1500))]);
+  return text({
+    paired: mode === "hub" ? tabCount() > 0 : Boolean(hubServer && hubServer.readyState === 1),
+    role: mode === "client" ? "attached to the shared bridge on this machine" : "the shared bridge",
+    tabs: mode === "hub" ? tabCount() : undefined,
+    code: CODE,
+    link: `${PUBLIC_APP}?pair=${CODE}${PUBLIC ? `&bridge=${encodeURIComponent(PUBLIC)}` : ""}`,
+    tls: TLS,
+    public: PUBLIC || null,
+    localLink: `http://localhost:4326/app?pair=${CODE}`,
+    port: PORT,
+    host: HOST,
+    ...(socketError ? { error: socketError } : {}),
+  });
+});
 
 server.registerTool("projects_list", {
   description: "The projects in the paired Vitela tab: id, name, root file, last update.",
@@ -292,22 +403,22 @@ server.registerTool("revisions_list", {
 }, run("revisions.list"));
 
 await server.connect(new StdioServerTransport());
-process.stderr.write(`vitela-bridge: listening on ${TLS ? "wss" : "ws"}://${HOST}:${PORT} · pairing code ${CODE}\n`);
-// The ready-to-open link that pairs a tab to THIS bridge — copy it into a
-// new browser tab. A second session on another paper just needs its own
-// VITELA_BRIDGE_PORT and VITELA_BRIDGE_CODE; each tab keeps its own bridge.
-{
-  const dest = PUBLIC || `127.0.0.1:${PORT}`;
-  process.stderr.write(`vitela-bridge: pair a tab -> ${PUBLIC_APP}?pair=${CODE}&bridge=${encodeURIComponent(dest)}\n`);
+await Promise.race([ready, new Promise((r) => setTimeout(r, 3000))]);
+if (mode === "client") {
+  process.stderr.write(`vitela-bridge: another session holds the bridge on :${PORT} — attached to it, same code ${CODE}\n`);
+  process.stderr.write(`vitela-bridge: open your paper with project_open(id); this session binds to that tab\n`);
+} else {
+  process.stderr.write(`vitela-bridge: shared bridge on ${TLS ? "wss" : "ws"}://${HOST}:${PORT} · pairing code ${CODE}\n`);
+  const origin = PUBLIC ? `https://${PUBLIC.split(":")[0]}` : "http://localhost:4326";
+  process.stderr.write(`vitela-bridge: pair every tab with code ${CODE} (Agent button), or open ${origin}/app?pair=${CODE}\n`);
 }
 // The bridge lives exactly as long as the agent that started it: when the
 // agent closes its end of stdio, the socket server would keep the process
 // alive on its own, orphaned on the port. Leave with the agent.
-process.stdin.on("close", () => {
-  wss.close();
+function leave() {
+  try { if (wss) wss.close(); } catch { /* already down */ }
+  try { if (hubServer) hubServer.close(); } catch { /* already down */ }
   process.exit(0);
-});
-process.stdin.on("end", () => {
-  wss.close();
-  process.exit(0);
-});
+}
+process.stdin.on("close", leave);
+process.stdin.on("end", leave);
