@@ -104,7 +104,9 @@ function tabList() { return [...tabs].filter((t) => t.readyState === 1); }
 function sessionRows(forTab) {
   return [...sessions].map((s) => ({
     id: s.info?.id ?? "?",
-    name: s.info?.name ?? "agent",
+    // The hub's own client name is known only after the MCP handshake,
+    // which lands after the port is bound: read it when asked, not once.
+    name: s === selfSession ? selfName() : (s.info?.name ?? "agent"),
     since: s.info?.since ?? null,
     paper: s.tabSock?._project ?? s.info?.paper ?? null,
     here: Boolean(forTab && s.tabSock === forTab),
