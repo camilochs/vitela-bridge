@@ -50,30 +50,48 @@ codex mcp add vitela-bridge -- npx -y github:camilochs/vitela-bridge
 2. Open Vitela, press **Agent** in the header, type the code (or open the link). The card says
    *Connected* and closes.
 3. Work. The agent reads the project, runs the check, compiles, verifies the bibliography, and
-   proposes changes you accept or reject in the margin.
+   proposes changes you accept or reject in the margin. **Reply** on a card writes a note the agent
+   reads; it withdraws that proposal and sends a better one.
 
 The code is stable on this machine — made once, kept in `~/.config/vitela-bridge/code`, reused on every
 start — and Vitela remembers it in the browser, so after the first time pressing **Agent** connects by
 itself. To get a new code, delete that file or set `VITELA_BRIDGE_CODE`.
 
+## Several sessions, one bridge
+
+One machine runs one shared bridge, and every tab pairs with it using the same code — so two agent
+sessions can drive two papers at once, with no ports or codes to juggle.
+
+1. Start each session as usual; both spawn the bridge with the same port and code. The first to start
+   holds the port and becomes the shared bridge; the next finds the port busy and attaches to it.
+   Nothing to configure.
+2. Open a Vitela tab per paper and pair each with the same code (Agent button, or `…/app?pair=123456`).
+3. In each session, open its paper with `project_open(id)`. The bridge binds that session to the tab
+   showing that paper; from then on the session's tools go to that tab. A lone session with a lone tab
+   needs no `project_open`.
+
+`bridge_status` says whether a session is the shared bridge or attached to it, and how many tabs the
+bridge holds. The bridge lives with the session that started it: if that session ends, an attached
+session loses it and must be restarted.
+
 ## Tools
 
 | Tool | What it does in the tab |
 |---|---|
-| `bridge_status` | Whether a tab is paired, the pairing code, and the link that pairs a tab when opened |
-| `projects_list`, `project_open` | The projects in the tab; switch to one |
+| `bridge_status` | Whether a tab is paired, the pairing code, the link that pairs a tab when opened — and, with several sessions, whether this one is the shared bridge or attached to it, and how many tabs it holds |
+| `projects_list`, `project_open` | The projects in the tab; switch to one. With several sessions, `project_open` binds this session to the tab showing that paper |
 | `files_list`, `file_read` | The open project's files and assets; read one |
 | `check` | The ExactTeX check: diagnostics, coverage, bibliography state |
 | `compile` | Compile to PDF; page count and diagnostics |
 | `claims`, `verify` | The document's external claims; verify them against the public registries and write the dated record |
 | `report` | The submission report's data |
-| `revision_propose` | Propose an addition, deletion or substitution as a revision the author accepts or rejects — prose, or a whole structure (a typed table, a figure, a TikZ picture) with `placement: "block"`; braces travel as long as they balance. Signed with the client and version (read from the MCP handshake) and the `model` and `provider` the agent states — e.g. `agent · claude-code 2.1.250 · claude-fable-5-1 (Anthropic)` — so every proposal is traceable. Checked before it is written: an error the document does not already have refuses the proposal and answers with the diagnostic, leaving the file untouched; an advisory travels back beside the answer; `force: true` writes it anyway |
+| `revision_propose` | Propose an addition, deletion or substitution as a revision the author accepts or rejects — prose, or a whole structure (a typed table, a figure, a TikZ picture) with `placement: "block"`; braces travel as long as they balance. Signed with the client and version (read from the MCP handshake) and the `model` and `provider` the agent states — e.g. `agent · claude-code 2.1.250 · claude-fable-5-1 (Anthropic)` — so every proposal is traceable. Checked before it is written: an error the document does not already have refuses the proposal and answers with the diagnostic, leaving the file untouched; an advisory travels back beside the answer; `force: true` writes it anyway. Refused at the door, nothing written: a bare `%`, a `->` inside a substitution, an anchor inside a command's argument, a space right after a macro's opening brace (TeX drops it — put the space before the macro), and a file that cannot carry a revision (a .cls, a .sty); suggestions live in .xtex, .tex and .bib files |
 | `revision_propose_set` | Propose several edits as one change: one card, one group in the sidecar, one Accept for all of them. The check runs over the result of the whole set, and an edit that cannot be placed fails the set — nothing half-applied |
 | `asset_put` | Write an image or PDF into the project (base64, up to 8 MB) so a proposed figure can point at it |
 | `page_image` | One page of the compiled PDF as an image, so the agent can judge what only the eye can judge |
 | `revision_withdraw` | Take back a proposal the agent made: the construct leaves and the document returns to what it said before |
 | `revisions_prune` | Drop sidecar records whose construct is no longer in the text |
-| `revisions_list` | Pending revisions and their authors |
+| `revisions_list` | Pending revisions and their authors, and the notes the author left on a card with **Reply** — feedback to read, then withdraw and re-propose |
 
 ## Configuration
 
@@ -109,7 +127,8 @@ over a tailnet:
    The tab keeps the bridge address, so the next time the Agent button connects on its own.
 
 The certificate expires; renew it with the same command and restart the agent. If the port is already
-held by an older bridge, `bridge_status` says so: stop that one first.
+held by another session's bridge, this one attaches to it (see *Several sessions, one bridge*);
+`bridge_status` says which role it has.
 
 The tab connects to the bridge on the machine that serves the page for a plain-`http` dev server, and on
 `127.0.0.1` for `localhost` and for the published site.
