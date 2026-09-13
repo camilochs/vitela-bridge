@@ -271,6 +271,14 @@ function startClient() {
   const url = `${scheme}://127.0.0.1:${PORT}`;
   const cwaiters = new Map(); // cid -> { resolve, reject, timer }
   let attached = false;
+  // A refusal is an answer: something is alive on the port and serving. It is
+  // never a reason to end that process — ask again, further apart each time.
+  // A hub mid-handover, or one still coming up, answers on a later try.
+  let refusals = 0;
+  const askAgain = () => {
+    const wait = Math.min(1000 * 2 ** refusals++, 30000);
+    setTimeout(() => { if (mode === "client") open(); }, wait);
+  };
   const open = () => {
     let answered = false;
     const ws = new WebSocket(url, { rejectUnauthorized: false });
@@ -279,8 +287,8 @@ function startClient() {
     ws.on("open", () => { ws.send(JSON.stringify({ type: "attach", code: CODE, id: selfInfo.id, name: selfName(), since: STARTED, paper: selfInfo.paper })); });
     ws.on("message", (raw) => {
       let msg; try { msg = JSON.parse(String(raw)); } catch { return; }
-      if (msg.type === "attached") { answered = true; attached = true; clearTimeout(silence); socketError = null; readyResolve(); return; }
-      if (msg.type === "refused") { answered = true; clearTimeout(silence); socketError = "the shared bridge refused this code"; try { ws.close(); } catch { /* down */ } takeOver(); return; }
+      if (msg.type === "attached") { answered = true; attached = true; refusals = 0; clearTimeout(silence); socketError = null; readyResolve(); return; }
+      if (msg.type === "refused") { answered = true; clearTimeout(silence); socketError = "the bridge on this port is serving a different pairing code"; try { ws.close(); } catch { /* down */ } askAgain(); return; }
       if (msg.type === "call-result" && cwaiters.has(msg.cid)) {
         const { resolve, reject, timer } = cwaiters.get(msg.cid); clearTimeout(timer); cwaiters.delete(msg.cid);
         if (msg.ok) resolve(msg.value); else reject(new Error(msg.error ?? "the shared bridge reported an error"));
@@ -320,12 +328,15 @@ function takeOver() {
   const scheme = TLS ? "wss" : "ws";
   let done = false;
   const ws = new WebSocket(`${scheme}://127.0.0.1:${PORT}`, { rejectUnauthorized: false });
-  const settle = (ended) => {
+  // Only silence earns the port. A process that answers — yielding it, or
+  // refusing us — is alive, and ending it would cost whichever tab it serves
+  // its agent.
+  const settle = (silent) => {
     if (done) return;
     done = true;
     clearTimeout(giveUp);
     try { ws.close(); } catch { /* down */ }
-    if (ended) endOldBridge();
+    if (silent) endOldBridge();
     finish();
   };
   const giveUp = setTimeout(() => settle(true), 2000);
@@ -333,7 +344,7 @@ function takeOver() {
   ws.on("message", (raw) => {
     let msg; try { msg = JSON.parse(String(raw)); } catch { return; }
     if (msg.type === "yielded") settle(false);
-    else if (msg.type === "refused") settle(true);
+    else if (msg.type === "refused") settle(false);
   });
   ws.on("error", () => settle(true));
 }
@@ -588,7 +599,11 @@ server.registerTool("revisions_list", {
 await server.connect(new StdioServerTransport());
 await Promise.race([ready, new Promise((r) => setTimeout(r, 3000))]);
 if (mode === "client") {
-  process.stderr.write(`vitela-bridge: another session holds the bridge on :${PORT} — attached to it, same code ${CODE}\n`);
+  // Say what is true at this moment. Attaching can still be refused, and a
+  // line claiming otherwise sends the author looking at the pairing code.
+  process.stderr.write(socketError
+    ? `vitela-bridge: another session holds the bridge on :${PORT} and did not take us — ${socketError}; asking again\n`
+    : `vitela-bridge: another session holds the bridge on :${PORT} — attached to it, same code ${CODE}\n`);
   process.stderr.write(`vitela-bridge: open your paper with project_open(id); this session binds to that tab\n`);
 } else {
   process.stderr.write(`vitela-bridge: shared bridge on ${TLS ? "wss" : "ws"}://${HOST}:${PORT} · pairing code ${CODE}\n`);
