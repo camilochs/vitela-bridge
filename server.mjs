@@ -183,12 +183,21 @@ async function routeForSession(session, tool, args, timeoutMs) {
 function startHub(wss) {
   mode = "hub";
   selfInfo.name = selfName();
+  // Six digits are a million codes, and any page open in the browser may
+  // open sockets to loopback: after five refusals in a minute the hub
+  // closes every new pairing without reading it, for the rest of that
+  // minute. A person mistyping the code waits a minute; a page guessing
+  // it needs years.
+  const refusals = [];
   wss.on("connection", (socket) => {
     let role = null; // "tab" | "session"
     let session = null;
     socket.on("message", (raw) => {
       let msg; try { msg = JSON.parse(String(raw)); } catch { return; }
       if (!role) {
+        const t = Date.now();
+        while (refusals.length && t - refusals[0] > 60_000) refusals.shift();
+        if (refusals.length >= 5) { socket.close(); return; }
         if (msg.type === "pair" && String(msg.code) === CODE) {
           role = "tab"; socket._project = msg.project ?? null; socket._session = null; tabs.add(socket);
           socket.send(JSON.stringify({ type: "paired" }));
@@ -212,6 +221,7 @@ function startHub(wss) {
           socket.send(JSON.stringify({ type: "yielded" }));
           handOver();
         } else {
+          refusals.push(t);
           socket.send(JSON.stringify({ type: "refused" })); socket.close();
         }
         return;
