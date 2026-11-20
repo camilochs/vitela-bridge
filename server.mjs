@@ -565,7 +565,7 @@ server.registerTool("revision_propose_set", {
 });
 
 server.registerTool("asset_put", {
-  description: "Write an image or PDF into the open project so a figure can point at it: `path` is the file name inside the project (subfolders allowed, no ..), `base64` its bytes. Only pdf, png, jpg and svg, up to 8 MB. The file appears in the author's tree at once; the figure that uses it still travels as a revision the author accepts.",
+  description: "Write an image or PDF into the open project so a figure can point at it, or a class or style file (.cls, .bst, .sty) that a journal template needs: `path` is the file name inside the project (subfolders allowed, no ..), `base64` its bytes. Only pdf, png, jpg, svg, cls, bst and sty, up to 8 MB; a class or style lands as a project file. The file appears in the author's tree at once; the text that uses it still travels as a revision the author accepts. Sources the author reviews (.tex, .xtex, .bib) never travel this way.",
   inputSchema: { path: z.string(), base64: z.string() },
 }, run("asset.put"));
 
