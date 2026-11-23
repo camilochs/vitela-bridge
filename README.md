@@ -85,6 +85,24 @@ The bridge tells the agent how to edit when it connects (the MCP server's instru
 5. **Pages and errors are measured in Vitela**: `compile` after the author accepts. Nothing is compiled elsewhere first.
 6. **A reply on a card is feedback**: `revisions_list` carries it as `notes`; withdraw and propose again, improved.
 
+## Asking from the tab
+
+With an agent connected, selecting text in Vitela's editor offers **Ask Claude**. I write what should change, and the request goes to the session that works on that tab. The answer comes back as a card, which shows the request it answers. If I reject one of the agent's cards, Vitela asks why; the comment goes to the agent, and it proposes again.
+
+For the request to start a turn on its own, the session has to be launched with the bridge as a channel. Channels are a research preview of Claude Code, so for now that means the development flag:
+
+```
+claude --dangerously-load-development-channels server:vitela-bridge
+```
+
+Claude Code asks once to confirm the flag, and then shows:
+
+```
+Channels (experimental) messages from server:vitela-bridge inject directly in this session
+```
+
+Without the flag nothing is lost. The request waits in Vitela's corner, and in `requests_list`, until I tell the session to look. A card answers a request when the agent passes its id as `request` in `revision_propose` or `revision_propose_set`.
+
 ## Tools
 
 | Tool | What it does in the tab |
@@ -102,6 +120,7 @@ The bridge tells the agent how to edit when it connects (the MCP server's instru
 | `page_image` | One page of the compiled PDF as an image, so the agent can judge what only the eye can judge |
 | `revision_withdraw` | Take back a proposal the agent made: the construct leaves and the document returns to what it said before |
 | `revisions_prune` | Drop sidecar records whose construct is no longer in the text |
+| `requests_list` | What the author asked from the tab and no card has answered yet: requests about a selected text, and rejections with their comment |
 | `revisions_list` | Pending revisions and their authors, and the notes the author left on a card with **Reply** — feedback to read, then withdraw and re-propose |
 
 ## Configuration
