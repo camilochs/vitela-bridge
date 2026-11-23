@@ -235,6 +235,18 @@ function startHub(wss) {
           // The author picks, from the tab, which session works here.
           const chosen = [...sessions].find((s) => s.info?.id === msg.session);
           if (chosen) bind(chosen, socket); else if (socket._session) unbind(socket._session);
+        } else if (msg.type === "ask" || msg.type === "rejected") {
+          // The author asks for a change, or rejects a card with a comment:
+          // it goes to the session that works on this tab. A tab no session
+          // works on, with several sessions on the machine, has to choose.
+          const event = authorEvent(msg);
+          const target = socket._session ?? (sessions.size === 1 ? [...sessions][0] : null);
+          if (!event) socket.send(JSON.stringify({ type: "ask-refused", id: msg.id ?? null, reason: "the request carried no text" }));
+          else if (!target) socket.send(JSON.stringify({ type: "ask-refused", id: event.id, reason: "more than one agent session is on this machine: choose the one that works here (Agent, then Use here) and send it again" }));
+          else {
+            if (target === selfSession) receive(event); else target.deliver({ type: "event", event });
+            socket.send(JSON.stringify({ type: "ask-sent", id: event.id, session: target.info?.id ?? null }));
+          }
         } else if (msg.type === "result" && pending.has(msg.id)) {
           const { resolve, reject, timer } = pending.get(msg.id); clearTimeout(timer); pending.delete(msg.id);
           if (msg.ok) resolve(msg.value); else reject(new Error(msg.error ?? "the tab reported an error"));
@@ -299,6 +311,7 @@ function startClient() {
       let msg; try { msg = JSON.parse(String(raw)); } catch { return; }
       if (msg.type === "attached") { answered = true; attached = true; refusals = 0; clearTimeout(silence); socketError = null; readyResolve(); return; }
       if (msg.type === "refused") { answered = true; clearTimeout(silence); socketError = "the bridge on this port is serving a different pairing code"; try { ws.close(); } catch { /* down */ } askAgain(); return; }
+      if (msg.type === "event" && msg.event) { receive(msg.event); return; }
       if (msg.type === "call-result" && cwaiters.has(msg.cid)) {
         const { resolve, reject, timer } = cwaiters.get(msg.cid); clearTimeout(timer); cwaiters.delete(msg.cid);
         if (msg.ok) resolve(msg.value); else reject(new Error(msg.error ?? "the shared bridge reported an error"));
@@ -409,6 +422,75 @@ async function callTab(tool, args, timeoutMs = 120_000) {
 
 function tabCount() { return tabList().length; }
 
+// ── What the author sends the agent ───────────────────────────────────────
+// Two things travel from the tab to the agent without being asked for: a
+// request about a stretch of text the author selected ("ask"), and the
+// comment left when rejecting one of the agent's cards ("rejected"). Each
+// lands in this session's inbox, which requests_list reads, and is pushed
+// into the session as a channel message, which starts a turn when the
+// session was launched with --dangerously-load-development-channels
+// server:vitela-bridge. Without the channel the message is dropped by the
+// client and the inbox is the only way in: the author sees the request
+// waiting until a card names it (director, 2026-11-23: "1a, 2a, 3a").
+const inbox = []; // { kind, id, file, text, request, comment, revision, excerpt, at }
+let nextEvent = 1;
+// requests_wait, the way any MCP client can hear of a request without being
+// told: a call held open until one arrives. What a call has already handed
+// over is not handed over again, so an agent that waits in a loop does not
+// spin on a request it could not answer; requests_list still shows it.
+const waiters = new Set();
+const handed = new WeakSet();
+function fresh() {
+  const events = inbox.filter((e) => !handed.has(e));
+  for (const e of events) handed.add(e);
+  return events;
+}
+function nextRequests(ms, signal) {
+  if (inbox.some((e) => !handed.has(e))) return Promise.resolve(fresh());
+  return new Promise((resolve) => {
+    const done = (events) => { clearTimeout(timer); waiters.delete(wake); signal?.removeEventListener("abort", gone); resolve(events); };
+    const wake = () => done(fresh());
+    const gone = () => done([]); // the client gave up: nothing is taken from the inbox
+    const timer = setTimeout(() => done([]), ms);
+    waiters.add(wake);
+    signal?.addEventListener("abort", gone);
+  });
+}
+const clip = (value, max) => String(value ?? "").slice(0, max);
+/** A tab's message, reduced to the fields the agent reads, with sizes bounded. */
+function authorEvent(msg) {
+  const kind = msg.type === "rejected" ? "rejected" : "ask";
+  const event = {
+    kind,
+    id: /^[A-Za-z0-9_-]{1,40}$/.test(String(msg.id ?? "")) ? String(msg.id) : `q${Date.now().toString(36)}${nextEvent++}`,
+    file: clip(msg.file, 300),
+    text: clip(msg.text, 20000),
+    request: clip(msg.request, 4000),
+    comment: clip(msg.comment, 4000),
+    revision: clip(msg.revision, 200),
+    excerpt: clip(msg.excerpt, 4000),
+  };
+  if (kind === "ask" && !(event.request.trim() && event.text)) return null;
+  if (kind === "rejected" && !event.revision) return null;
+  return event;
+}
+function receive(event) {
+  inbox.push({ ...event, at: new Date().toISOString() });
+  for (const wake of [...waiters]) wake();
+  const content = event.kind === "ask"
+    ? `The author selected text in ${event.file} and asks for a change.\n\nRequest: ${event.request}\n\nSelected text, exactly as it stands in the file:\n${event.text}\n\nAnswer with ONE card anchored on that text (revision_propose, or revision_propose_set when it is one change in several places) and pass request: "${event.id}", so the tab shows the card as the answer to this request.`
+    : `The author rejected your card ${event.revision} in ${event.file}${event.request ? ` (it answered the request: ${event.request})` : ""}${event.comment ? `, with this comment:\n${event.comment}` : ", without a comment."}\n\nThe rejected card read:\n${event.excerpt}\n\nThe rejection restored the original text: read the file again, then propose a new card that answers the comment, and pass request: "${event.id}".`;
+  const meta = { kind: event.kind, request_id: event.id, file: event.file };
+  if (event.revision) meta.revision = event.revision;
+  server.server.notification({ method: "notifications/claude/channel", params: { content, meta } }).catch(() => { /* no client listening */ });
+}
+/** A proposal that names a request answers it: it leaves the inbox. */
+function answered(args) {
+  const id = String(args?.request ?? "");
+  if (!id) return;
+  for (let i = inbox.length - 1; i >= 0; i--) if (inbox[i].id === id) inbox.splice(i, 1);
+}
+
 const text = (value) => ({ content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] });
 const fail = (error) => ({ content: [{ type: "text", text: `error: ${error.message ?? error}` }], isError: true });
 const run = (tool, timeout) => async (args) => {
@@ -449,9 +531,15 @@ The author works in the review margin: every proposal is a CARD they accept, rej
 4. What a card cannot carry, and what to do instead: a bare % on the LAST line of a piece (end the piece a line earlier, or escape it as \\%); a -> inside a substitution (cut the piece before and after the figure, or send a deletion and an addition as one set); braces that do not balance (cut where they close); an anchor inside a command's argument or a braced group (propose the enclosing block whole, or pass force: true when the cut must start there). Each refusal says what to do; follow it once, do not iterate blindly.
 5. Pages, length and errors are measured in Vitela: call compile after the author accepts, read pages and errors. Do not compile elsewhere before proposing.
 6. The author's reply on a card is feedback: revisions_list carries it as notes. Withdraw the card and propose again, improved. Never repeat a refused proposal unchanged.
-7. Never write text: read, check, compile, propose. The document changes only when the author accepts.`;
+7. Never write text: read, check, compile, propose. The document changes only when the author accepts.
+8. The author can write to you from the tab: a request about text they selected, or the comment they left when rejecting your card. Each arrives as a <channel source="vitela-bridge" kind="ask|rejected" request_id="..."> message when this session was started with the channel, and always waits in requests_list; when the author asks you to stay listening, requests_wait holds a call open until one arrives. Answer each with a card and pass its request_id as \`request\` in revision_propose or revision_propose_set: the tab shows the card as the answer, and the request leaves the list. A rejection's comment is feedback on that card: propose again, improved.`;
 
-const server = new McpServer({ name: "vitela-bridge", version: "0.1.0" }, { instructions: EDITING_PROTOCOL });
+// experimental["claude/channel"]: the bridge may push the author's requests
+// into the session (see receive). A client that does not know it ignores it.
+const server = new McpServer(
+  { name: "vitela-bridge", version: "0.1.0" },
+  { instructions: EDITING_PROTOCOL, capabilities: { experimental: { "claude/channel": {} } } },
+);
 
 server.registerTool("bridge_status", {
   description: "Whether a Vitela tab is paired, the pairing code to type in Vitela (Agent button), and a link that pairs the tab by itself when opened. The code is stable on this machine, so the author needs it once; Vitela remembers it afterwards.",
@@ -532,10 +620,13 @@ server.registerTool("revision_propose", {
     force: z.boolean().optional(),
     model: z.string().optional(),
     provider: z.string().optional(),
+    request: z.string().optional().describe("the request_id of the author's request this card answers (from a channel message or requests_list)"),
   },
 }, async (args) => {
   try {
-    return text(await callTab("revision.propose", { ...(args ?? {}), author: authorOf(args ?? {}) }));
+    const value = await callTab("revision.propose", { ...(args ?? {}), author: authorOf(args ?? {}) });
+    answered(args);
+    return text(value);
   } catch (error) {
     return fail(error);
   }
@@ -555,10 +646,13 @@ server.registerTool("revision_propose_set", {
     force: z.boolean().optional(),
     model: z.string().optional(),
     provider: z.string().optional(),
+    request: z.string().optional().describe("the request_id of the author's request this card answers (from a channel message or requests_list)"),
   },
 }, async (args) => {
   try {
-    return text(await callTab("revision.propose_set", { ...(args ?? {}), author: authorOf(args ?? {}) }));
+    const value = await callTab("revision.propose_set", { ...(args ?? {}), author: authorOf(args ?? {}) });
+    answered(args);
+    return text(value);
   } catch (error) {
     return fail(error);
   }
@@ -600,6 +694,19 @@ server.registerTool("revisions_prune", {
   description: "Drop sidecar records whose construct is no longer in the text — the repair for a record left behind when a change removed prose that held another pending one. Returns the ids dropped. It never touches a record whose construct is still there.",
   inputSchema: {},
 }, run("revisions.prune"));
+
+server.registerTool("requests_list", {
+  description: "What the author has asked of this session from the Vitela tab and no card has answered yet: requests about a selected stretch of text (kind ask: the exact text, the file, what to change) and rejections of your cards with the author's comment (kind rejected). Answer each with a card and pass its id as `request` in revision_propose or revision_propose_set; that removes it from this list. When the session runs with the channel these also arrive on their own as channel messages.",
+  inputSchema: {},
+}, async () => text(inbox.length ? inbox : "no request is waiting"));
+
+server.registerTool("requests_wait", {
+  description: "Wait for the author to ask something from the Vitela tab: the call stays open until a request or a rejection arrives, and returns it (same fields as requests_list), or returns empty-handed after `seconds` (default 50, at most 300; stay under your client's tool-call limit). Works in any MCP client. Use it only when the author asks you to stay listening: answer what arrives with a card that names its id as `request`, then call it again. Each request is returned once; what is still unanswered stays in requests_list.",
+  inputSchema: { seconds: z.number().min(1).max(300).optional() },
+}, async (args, extra) => {
+  const events = await nextRequests((args?.seconds ?? 50) * 1000, extra?.signal);
+  return text(events.length ? events : "nothing arrived; call again to keep listening");
+});
 
 server.registerTool("revisions_list", {
   description: "Pending revisions in the open project with their authors and status. Each row carries any `notes` the author left on that card (the Reply button writes them): read them as feedback and RE-PROPOSE the change improved — withdraw the old proposal (revision_withdraw) and propose a better one that answers the note.",
