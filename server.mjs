@@ -96,7 +96,7 @@ function selfName() {
 // HUB state
 const tabs = new Set();       // browser sockets; each carries _project and _session
 const sessions = new Set();   // { tabSock, deliver, info } — the hub's own session and every attached one
-const selfSession = { tabSock: null, info: selfInfo }; // this process's own MCP session
+const selfSession = { tabSock: null, info: selfInfo, asks: true }; // this process's own MCP session
 sessions.add(selfSession);
 
 function tabList() { return [...tabs].filter((t) => t.readyState === 1); }
@@ -200,7 +200,7 @@ function startHub(wss) {
         if (refusals.length >= 5) { socket.close(); return; }
         if (msg.type === "pair" && String(msg.code) === CODE) {
           role = "tab"; socket._project = msg.project ?? null; socket._session = null; tabs.add(socket);
-          socket.send(JSON.stringify({ type: "paired" }));
+          socket.send(JSON.stringify({ type: "paired", asks: true })); // this bridge takes the author's requests; an earlier one drops them
           // A session that had opened this paper takes the tab back: after a
           // handover the tabs reconnect on their own and find their session.
           const owner = [...sessions].find((s) => !s.tabSock && s.info?.paper && s.info.paper === socket._project);
@@ -211,6 +211,7 @@ function startHub(wss) {
             tabSock: null,
             deliver: (m) => socket.send(JSON.stringify(m)),
             info: { id: msg.id ?? `s${nextId++}`, name: msg.name ?? "agent", since: msg.since ?? Date.now(), paper: msg.paper ?? null },
+            asks: msg.asks === true, // a session on an earlier bridge would drop a request
           };
           sessions.add(session);
           socket.send(JSON.stringify({ type: "attached" }));
@@ -243,6 +244,7 @@ function startHub(wss) {
           const target = socket._session ?? (sessions.size === 1 ? [...sessions][0] : null);
           if (!event) socket.send(JSON.stringify({ type: "ask-refused", id: msg.id ?? null, reason: "the request carried no text" }));
           else if (!target) socket.send(JSON.stringify({ type: "ask-refused", id: event.id, reason: "more than one agent session is on this machine: choose the one that works here (Agent, then Use here) and send it again" }));
+          else if (!target.asks) socket.send(JSON.stringify({ type: "ask-refused", id: event.id, reason: "the agent session on this paper runs an earlier bridge that cannot take requests: restart that agent and send it again" }));
           else {
             if (target === selfSession) receive(event); else target.deliver({ type: "event", event });
             socket.send(JSON.stringify({ type: "ask-sent", id: event.id, session: target.info?.id ?? null }));
@@ -306,7 +308,7 @@ function startClient() {
     const ws = new WebSocket(url, { rejectUnauthorized: false });
     hubServer = ws;
     const silence = setTimeout(() => { if (!answered && mode === "client") { try { ws.close(); } catch { /* down */ } takeOver(); } }, 2500);
-    ws.on("open", () => { ws.send(JSON.stringify({ type: "attach", code: CODE, id: selfInfo.id, name: selfName(), since: STARTED, paper: selfInfo.paper })); });
+    ws.on("open", () => { ws.send(JSON.stringify({ type: "attach", code: CODE, id: selfInfo.id, name: selfName(), since: STARTED, paper: selfInfo.paper, asks: true })); });
     ws.on("message", (raw) => {
       let msg; try { msg = JSON.parse(String(raw)); } catch { return; }
       if (msg.type === "attached") { answered = true; attached = true; refusals = 0; clearTimeout(silence); socketError = null; readyResolve(); return; }
