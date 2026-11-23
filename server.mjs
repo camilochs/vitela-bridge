@@ -210,6 +210,7 @@ function startHub(wss) {
           session = {
             tabSock: null,
             deliver: (m) => socket.send(JSON.stringify(m)),
+            leave: () => { try { socket.close(); } catch { /* gone */ } },
             info: { id: msg.id ?? `s${nextId++}`, name: msg.name ?? "agent", since: msg.since ?? Date.now(), paper: msg.paper ?? null },
             asks: msg.asks === true, // a session on an earlier bridge would drop a request
           };
@@ -241,7 +242,13 @@ function startHub(wss) {
           // it goes to the session that works on this tab. A tab no session
           // works on, with several sessions on the machine, has to choose.
           const event = authorEvent(msg);
-          const target = socket._session ?? (sessions.size === 1 ? [...sessions][0] : null);
+          if (event) event.project = clip(socket._project, 100);
+          // The session that works on this tab takes it. When that one runs an
+          // earlier bridge, or none works here, and exactly one session on the
+          // machine can take requests, it goes there: the author is not asked
+          // to choose among sessions of which only one could answer.
+          const able = [...sessions].filter((s) => s.asks);
+          const target = socket._session?.asks ? socket._session : able.length === 1 ? able[0] : socket._session ?? null;
           if (!event) socket.send(JSON.stringify({ type: "ask-refused", id: msg.id ?? null, reason: "the request carried no text" }));
           else if (!target) socket.send(JSON.stringify({ type: "ask-refused", id: event.id, reason: "more than one agent session is on this machine: choose the one that works here (Agent, then Use here) and send it again" }));
           else if (!target.asks) socket.send(JSON.stringify({ type: "ask-refused", id: event.id, reason: "the agent session on this paper runs an earlier bridge that cannot take requests: restart that agent and send it again" }));
@@ -280,7 +287,9 @@ function handOver() {
   try { if (tlsServer) tlsServer.close(); } catch { /* already down */ }
   wss = null; tlsServer = null;
   tabs.clear();
-  for (const s of [...sessions]) if (s !== selfSession) sessions.delete(s);
+  // An attached session left on a socket of the bridge that stepped down
+  // would keep calling a hub with no tab: close it, and it follows the port.
+  for (const s of [...sessions]) if (s !== selfSession) { sessions.delete(s); s.leave?.(); }
   selfSession.tabSock = null;
   mode = null;
   setTimeout(() => startClient(), 400);
@@ -323,8 +332,11 @@ function startClient() {
       if (hubServer === ws) hubServer = null;
       clearTimeout(silence);
       // The hub went away (it handed over, or its session ended): follow the
-      // port — attach again, or take it when nothing listens.
-      if (mode === "client" && attached) { attached = false; setTimeout(() => { if (mode === "client") open(); }, 700); }
+      // port. Try to bind it at once and attach when another process already
+      // has it. A bridge of an earlier version waits 700 ms before it looks,
+      // so the port passes to a current bridge and never back to an old one:
+      // the hub the tabs find again is the newest code on the machine.
+      if (mode === "client" && attached) { attached = false; setTimeout(() => { if (mode === "client") { mode = null; bringUp(); } }, 50); }
     });
     ws.on("error", (e) => {
       clearTimeout(silence);
@@ -479,9 +491,11 @@ function authorEvent(msg) {
 function receive(event) {
   inbox.push({ ...event, at: new Date().toISOString() });
   for (const wake of [...waiters]) wake();
+  // The request may come from a paper this session has not opened yet.
+  const paper = event.project ? ` (project ${event.project}; if it is not the project you have open, call project_open with that id first)` : "";
   const content = event.kind === "ask"
-    ? `The author selected text in ${event.file} and asks for a change.\n\nRequest: ${event.request}\n\nSelected text, exactly as it stands in the file:\n${event.text}\n\nAnswer with ONE card anchored on that text (revision_propose, or revision_propose_set when it is one change in several places) and pass request: "${event.id}", so the tab shows the card as the answer to this request.`
-    : `The author rejected your card ${event.revision} in ${event.file}${event.request ? ` (it answered the request: ${event.request})` : ""}${event.comment ? `, with this comment:\n${event.comment}` : ", without a comment."}\n\nThe rejected card read:\n${event.excerpt}\n\nThe rejection restored the original text: read the file again, then propose a new card that answers the comment, and pass request: "${event.id}".`;
+    ? `The author selected text in ${event.file}${paper} and asks for a change.\n\nRequest: ${event.request}\n\nSelected text, exactly as it stands in the file:\n${event.text}\n\nAnswer with ONE card anchored on that text (revision_propose, or revision_propose_set when it is one change in several places) and pass request: "${event.id}", so the tab shows the card as the answer to this request.`
+    : `The author rejected your card ${event.revision} in ${event.file}${paper}${event.request ? ` (it answered the request: ${event.request})` : ""}${event.comment ? `, with this comment:\n${event.comment}` : ", without a comment."}\n\nThe rejected card read:\n${event.excerpt}\n\nThe rejection restored the original text: read the file again, then propose a new card that answers the comment, and pass request: "${event.id}".`;
   const meta = { kind: event.kind, request_id: event.id, file: event.file };
   if (event.revision) meta.revision = event.revision;
   server.server.notification({ method: "notifications/claude/channel", params: { content, meta } }).catch(() => { /* no client listening */ });
