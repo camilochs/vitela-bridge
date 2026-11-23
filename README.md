@@ -101,7 +101,7 @@ Claude Code asks once to confirm the flag, and then shows:
 Channels (experimental) messages from server:vitela-bridge inject directly in this session
 ```
 
-With another client, or without the flag, the request waits in Vitela's corner, and in `requests_list` while that session runs, until I tell the agent to look. A card answers a request when the agent passes its id as `request` in `revision_propose` or `revision_propose_set`.
+With another client, or without the flag, the request waits in Vitela's corner, and in `requests_list` while that session runs, until I tell the agent to look. I can also tell it to stay listening: it calls `requests_wait`, which returns when a request arrives. The agent has to be in that call at that moment, and some clients cut long calls. A card answers a request when the agent passes its id as `request` in `revision_propose` or `revision_propose_set`.
 
 ## Tools
 
@@ -121,6 +121,7 @@ With another client, or without the flag, the request waits in Vitela's corner, 
 | `revision_withdraw` | Take back a proposal the agent made: the construct leaves and the document returns to what it said before |
 | `revisions_prune` | Drop sidecar records whose construct is no longer in the text |
 | `requests_list` | What the author asked from the tab and no card has answered yet: requests about a selected text, and rejections with their comment |
+| `requests_wait` | Stay listening: the call stays open until the author asks something, or until `seconds` pass (50 by default) |
 | `revisions_list` | Pending revisions and their authors, and the notes the author left on a card with **Reply** — feedback to read, then withdraw and re-propose |
 
 ## Configuration

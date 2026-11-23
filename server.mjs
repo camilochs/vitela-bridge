@@ -434,6 +434,28 @@ function tabCount() { return tabList().length; }
 // waiting until a card names it (director, 2026-11-23: "1a, 2a, 3a").
 const inbox = []; // { kind, id, file, text, request, comment, revision, excerpt, at }
 let nextEvent = 1;
+// requests_wait, the way any MCP client can hear of a request without being
+// told: a call held open until one arrives. What a call has already handed
+// over is not handed over again, so an agent that waits in a loop does not
+// spin on a request it could not answer; requests_list still shows it.
+const waiters = new Set();
+const handed = new WeakSet();
+function fresh() {
+  const events = inbox.filter((e) => !handed.has(e));
+  for (const e of events) handed.add(e);
+  return events;
+}
+function nextRequests(ms, signal) {
+  if (inbox.some((e) => !handed.has(e))) return Promise.resolve(fresh());
+  return new Promise((resolve) => {
+    const done = (events) => { clearTimeout(timer); waiters.delete(wake); signal?.removeEventListener("abort", gone); resolve(events); };
+    const wake = () => done(fresh());
+    const gone = () => done([]); // the client gave up: nothing is taken from the inbox
+    const timer = setTimeout(() => done([]), ms);
+    waiters.add(wake);
+    signal?.addEventListener("abort", gone);
+  });
+}
 const clip = (value, max) => String(value ?? "").slice(0, max);
 /** A tab's message, reduced to the fields the agent reads, with sizes bounded. */
 function authorEvent(msg) {
@@ -454,6 +476,7 @@ function authorEvent(msg) {
 }
 function receive(event) {
   inbox.push({ ...event, at: new Date().toISOString() });
+  for (const wake of [...waiters]) wake();
   const content = event.kind === "ask"
     ? `The author selected text in ${event.file} and asks for a change.\n\nRequest: ${event.request}\n\nSelected text, exactly as it stands in the file:\n${event.text}\n\nAnswer with ONE card anchored on that text (revision_propose, or revision_propose_set when it is one change in several places) and pass request: "${event.id}", so the tab shows the card as the answer to this request.`
     : `The author rejected your card ${event.revision} in ${event.file}${event.request ? ` (it answered the request: ${event.request})` : ""}${event.comment ? `, with this comment:\n${event.comment}` : ", without a comment."}\n\nThe rejected card read:\n${event.excerpt}\n\nThe rejection restored the original text: read the file again, then propose a new card that answers the comment, and pass request: "${event.id}".`;
@@ -509,7 +532,7 @@ The author works in the review margin: every proposal is a CARD they accept, rej
 5. Pages, length and errors are measured in Vitela: call compile after the author accepts, read pages and errors. Do not compile elsewhere before proposing.
 6. The author's reply on a card is feedback: revisions_list carries it as notes. Withdraw the card and propose again, improved. Never repeat a refused proposal unchanged.
 7. Never write text: read, check, compile, propose. The document changes only when the author accepts.
-8. The author can write to you from the tab: a request about text they selected, or the comment they left when rejecting your card. Each arrives as a <channel source="vitela-bridge" kind="ask|rejected" request_id="..."> message when this session was started with the channel, and always waits in requests_list. Answer each with a card and pass its request_id as \`request\` in revision_propose or revision_propose_set: the tab shows the card as the answer, and the request leaves the list. A rejection's comment is feedback on that card: propose again, improved.`;
+8. The author can write to you from the tab: a request about text they selected, or the comment they left when rejecting your card. Each arrives as a <channel source="vitela-bridge" kind="ask|rejected" request_id="..."> message when this session was started with the channel, and always waits in requests_list; when the author asks you to stay listening, requests_wait holds a call open until one arrives. Answer each with a card and pass its request_id as \`request\` in revision_propose or revision_propose_set: the tab shows the card as the answer, and the request leaves the list. A rejection's comment is feedback on that card: propose again, improved.`;
 
 // experimental["claude/channel"]: the bridge may push the author's requests
 // into the session (see receive). A client that does not know it ignores it.
@@ -676,6 +699,14 @@ server.registerTool("requests_list", {
   description: "What the author has asked of this session from the Vitela tab and no card has answered yet: requests about a selected stretch of text (kind ask: the exact text, the file, what to change) and rejections of your cards with the author's comment (kind rejected). Answer each with a card and pass its id as `request` in revision_propose or revision_propose_set; that removes it from this list. When the session runs with the channel these also arrive on their own as channel messages.",
   inputSchema: {},
 }, async () => text(inbox.length ? inbox : "no request is waiting"));
+
+server.registerTool("requests_wait", {
+  description: "Wait for the author to ask something from the Vitela tab: the call stays open until a request or a rejection arrives, and returns it (same fields as requests_list), or returns empty-handed after `seconds` (default 50, at most 300; stay under your client's tool-call limit). Works in any MCP client. Use it only when the author asks you to stay listening: answer what arrives with a card that names its id as `request`, then call it again. Each request is returned once; what is still unanswered stays in requests_list.",
+  inputSchema: { seconds: z.number().min(1).max(300).optional() },
+}, async (args, extra) => {
+  const events = await nextRequests((args?.seconds ?? 50) * 1000, extra?.signal);
+  return text(events.length ? events : "nothing arrived; call again to keep listening");
+});
 
 server.registerTool("revisions_list", {
   description: "Pending revisions in the open project with their authors and status. Each row carries any `notes` the author left on that card (the Reply button writes them): read them as feedback and RE-PROPOSE the change improved — withdraw the old proposal (revision_withdraw) and propose a better one that answers the note.",

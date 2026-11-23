@@ -72,6 +72,24 @@ await wait(800);
 check("a rejection with its comment reaches the session", other.heard.some((p) => p.meta?.kind === "rejected" && p.meta?.revision === "change:shorter" && /keep the word long/.test(p.content)));
 check("and waits in requests_list", /keep the word long/.test(textOf(await other.client.callTool({ name: "requests_list", arguments: {} }))));
 
+// requests_wait: held open until a request arrives, each handed over once.
+const wait1 = async (args, options) => textOf(await other.client.callTool({ name: "requests_wait", arguments: args }, undefined, options));
+check("requests_wait hands over what was already waiting", /keep the word long/.test(await wait1({ seconds: 1 })));
+const t0 = Date.now();
+check("and does not hand it over twice", /nothing arrived/.test(await wait1({ seconds: 1 })) && Date.now() - t0 >= 900);
+const held = wait1({ seconds: 10 });
+await wait(300);
+tab.send(JSON.stringify({ type: "ask", id: "q2", file: "main.xtex", text: "another sentence", request: "in plain words" }));
+const t1 = Date.now();
+check("a held call returns when a request arrives", /in plain words/.test(await held) && Date.now() - t1 < 3000);
+// A client that gives up takes nothing with it.
+const ac = new AbortController();
+const dropped = wait1({ seconds: 10 }, { signal: ac.signal }).catch(() => "aborted");
+await wait(300); ac.abort(); await dropped; await wait(200);
+tab.send(JSON.stringify({ type: "ask", id: "q3", file: "main.xtex", text: "a third sentence", request: "after the abort" }));
+await wait(300);
+check("a call the client aborted takes no request with it", /after the abort/.test(await wait1({ seconds: 2 })));
+
 tab.close();
 await other.client.close();
 await hub.client.close();
