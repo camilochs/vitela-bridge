@@ -31,18 +31,21 @@ const other = await session("other-session");
 await wait(1500);
 
 // A fake tab: pairs, answers every call with a card id, records the sessions.
-let rows = [];
+let rows = [], paired = null;
 const replies = [];
 const tab = new WebSocket(`ws://127.0.0.1:${PORT}`);
 await new Promise((r) => tab.on("open", r));
 tab.on("message", (raw) => {
   const msg = JSON.parse(String(raw));
   if (msg.type === "sessions") rows = msg.list;
+  if (msg.type === "paired") paired = msg;
   if (msg.type === "ask-sent" || msg.type === "ask-refused") replies.push(msg);
   if (msg.type === "call") tab.send(JSON.stringify({ type: "result", id: msg.id, ok: true, value: { id: "change:shorter", file: "main.xtex" } }));
 });
 tab.send(JSON.stringify({ type: "pair", code: CODE, project: "p1" }));
 await wait(600);
+
+check("the bridge says it takes requests", paired?.asks === true);
 
 // With two sessions and no choice, the tab is told to choose.
 tab.send(JSON.stringify({ type: "ask", id: "q1", file: "main.xtex", text: "a long sentence", request: "shorten it" }));
@@ -89,6 +92,21 @@ await wait(300); ac.abort(); await dropped; await wait(200);
 tab.send(JSON.stringify({ type: "ask", id: "q3", file: "main.xtex", text: "a third sentence", request: "after the abort" }));
 await wait(300);
 check("a call the client aborted takes no request with it", /after the abort/.test(await wait1({ seconds: 2 })));
+
+// A session on an earlier bridge attaches without saying it takes requests:
+// one sent to it is refused with the reason, never dropped.
+const old = new WebSocket(`ws://127.0.0.1:${PORT}`);
+await new Promise((r) => old.on("open", r));
+const reached = [];
+old.on("message", (m) => reached.push(JSON.parse(String(m)).type));
+old.send(JSON.stringify({ type: "attach", code: CODE, id: "sold", name: "old-session" }));
+await wait(300);
+tab.send(JSON.stringify({ type: "choose", session: "sold" }));
+await wait(300);
+tab.send(JSON.stringify({ type: "ask", id: "q4", file: "main.xtex", text: "a fourth sentence", request: "to an old session" }));
+await wait(400);
+check("a session on an earlier bridge: the request is refused with the reason", replies.at(-1)?.type === "ask-refused" && replies.at(-1)?.id === "q4" && /restart/.test(replies.at(-1)?.reason ?? "") && !reached.includes("event"));
+old.close();
 
 tab.close();
 await other.client.close();
