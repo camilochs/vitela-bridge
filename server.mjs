@@ -10,10 +10,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocketServer } from "ws";
 import { createServer as createTlsServer } from "node:https";
-import { randomInt } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { createHash, randomInt } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 const PORT = Number(process.env.VITELA_BRIDGE_PORT ?? 4329);
@@ -73,7 +74,39 @@ const PUBLIC_APP = "https://vitela.artificialfallibility.com/app";
 // client, its tabs reconnecting on their own; one that does not is a
 // vitela-bridge of an earlier version, and only such a process is ended.
 import { WebSocket } from "ws";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
+
+// ── The bridge renews itself ─────────────────────────────────────────────
+// An agent session lives for weeks and keeps the bridge it started with,
+// while the bridge on disk and the published Vitela move on. On 2026-11-23
+// the shared bridge of a machine was nine days old, twelve sessions hung
+// from it, and a feature already in production was missing in the tab until
+// the processes were replaced by hand. So a bridge watches its own file.
+// When the file is no longer the code that runs, the new code loads, and no
+// call is in flight, the process replaces its own image: same pid, same
+// stdio, and the agent's client notices nothing. The new image repeats the
+// MCP handshake to itself from what the client said, tells the client the
+// tool list changed, and takes the port or attaches as any bridge does.
+// What it carries across is at the end of the file (renew), where the MCP
+// side is known.
+const SELF = fileURLToPath(import.meta.url);
+/** A run that only shows the file loads: it stops before binding or serving. */
+const PROBE = process.env.VITELA_BRIDGE_PROBE === "1";
+function buildOnDisk() {
+  try { return createHash("sha256").update(readFileSync(SELF)).digest("hex").slice(0, 12); } catch { return null; }
+}
+const BUILD = buildOnDisk();
+/** What the image before this one handed over, when this is a renewal. */
+const carried = (() => {
+  const file = process.env.VITELA_BRIDGE_CARRY;
+  if (!file) return null;
+  delete process.env.VITELA_BRIDGE_CARRY;
+  try {
+    const kept = JSON.parse(readFileSync(file, "utf8"));
+    rmSync(dirname(file), { recursive: true, force: true });
+    return kept;
+  } catch { return null; }
+})();
 
 let nextId = 1;
 const pending = new Map(); // hub: call id -> { resolve, reject, timer }
@@ -82,12 +115,12 @@ let mode = null; // "hub" | "client"
 let hubServer = null; // client: the socket to the hub
 let readyResolve;
 const ready = new Promise((r) => { readyResolve = r; });
-const STARTED = Date.now();
+const STARTED = carried?.since ?? Date.now();
 
 // A name the author can recognise in the tab: the MCP client (known at the
 // handshake), when it started, and the paper it holds. The pid tells two
 // sessions of one client apart.
-const selfInfo = { id: `s${process.pid}`, name: "agent", since: STARTED, paper: null };
+const selfInfo = { id: `s${process.pid}`, name: "agent", since: STARTED, paper: carried?.paper ?? null };
 function selfName() {
   const client = typeof server !== "undefined" ? server.server.getClientVersion?.() : null;
   return client?.name ? (client.version ? `${client.name} ${client.version}` : client.name) : "agent";
@@ -165,6 +198,7 @@ function askTab(target, tool, args, timeoutMs) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { pending.delete(id); reject(new Error(`the tab did not answer ${tool} within ${timeoutMs / 1000}s`)); }, timeoutMs);
     pending.set(id, { resolve, reject, timer });
+    lastTraffic = Date.now();
     target.send(JSON.stringify({ type: "call", id, tool, args }));
   });
 }
@@ -425,12 +459,18 @@ function bringUp() {
     });
   }
 }
-bringUp();
+if (!PROBE) bringUp();
 
 async function callTab(tool, args, timeoutMs = 120_000) {
   if (socketError && mode !== "hub") return Promise.reject(new Error(socketError));
   await ready;
-  if (mode === "client") return clientCall(tool, args ?? {}, timeoutMs);
+  if (mode === "client") {
+    const value = await clientCall(tool, args ?? {}, timeoutMs);
+    // Remembered here too: the session says its paper when it attaches again,
+    // so a hub that changed finds its tab without the agent opening it twice.
+    if (tool === "project.open" && args?.id) selfInfo.paper = args.id;
+    return value;
+  }
   return routeForSession(selfSession, tool, args ?? {}, timeoutMs);
 }
 
@@ -447,6 +487,7 @@ function tabCount() { return tabList().length; }
 // client and the inbox is the only way in: the author sees the request
 // waiting until a card names it (director, 2026-11-23: "1a, 2a, 3a").
 const inbox = []; // { kind, id, file, text, request, comment, revision, excerpt, at }
+let lastTraffic = Date.now(); // the last message in or out, for renew
 let nextEvent = 1;
 // requests_wait, the way any MCP client can hear of a request without being
 // told: a call held open until one arrives. What a call has already handed
@@ -454,6 +495,7 @@ let nextEvent = 1;
 // spin on a request it could not answer; requests_list still shows it.
 const waiters = new Set();
 const handed = new WeakSet();
+for (const kept of carried?.inbox ?? []) { inbox.push(kept.event); if (kept.handed) handed.add(kept.event); }
 function fresh() {
   const events = inbox.filter((e) => !handed.has(e));
   for (const e of events) handed.add(e);
@@ -571,6 +613,8 @@ server.registerTool("bridge_status", {
     code: CODE,
     link: `${PUBLIC_APP}?pair=${CODE}${PUBLIC ? `&bridge=${encodeURIComponent(PUBLIC)}` : ""}`,
     tls: TLS,
+    build: BUILD,
+    ...(newer ? { newer: !canRenew ? `build ${newer.build} is on disk; restart the agent to load it (this Node cannot replace a running process)` : newer.loads === false ? `build ${newer.build} is on disk but does not load; this bridge stays on its own` : `build ${newer.build} is on disk; this bridge loads it as soon as no call is in flight` } : {}),
     public: PUBLIC || null,
     localLink: `http://localhost:4326/app?pair=${CODE}`,
     port: PORT,
@@ -729,7 +773,98 @@ server.registerTool("revisions_list", {
   inputSchema: {},
 }, run("revisions.list"));
 
-await server.connect(new StdioServerTransport());
+if (PROBE) process.exit(0);
+
+// What the client said at the handshake and which calls are unanswered:
+// read off the wire, because a renewal needs both.
+const REPLAY = "vitela-bridge-renewal";
+let hello = carried?.hello ?? null;
+const inflight = new Set();
+const transport = new StdioServerTransport();
+transport.onmessage = (msg) => {
+  lastTraffic = Date.now();
+  if (msg?.method === "initialize" && msg.id !== REPLAY) hello = msg.params;
+  if (msg?.method === "notifications/cancelled") inflight.delete(msg.params?.requestId);
+  else if (msg?.method && msg.id !== undefined) inflight.add(msg.id);
+};
+const write = transport.send.bind(transport);
+transport.send = (msg, options) => {
+  lastTraffic = Date.now();
+  if (msg && msg.id !== undefined && !msg.method) {
+    inflight.delete(msg.id);
+    if (msg.id === REPLAY) return Promise.resolve(); // the answer to our own handshake stays here
+  }
+  return write(msg, options);
+};
+await server.connect(transport);
+if (carried?.hello) {
+  // The client shook hands with the image before this one. Repeat it here,
+  // so this server knows its client, and say the tools may have changed.
+  transport.onmessage({ jsonrpc: "2.0", id: REPLAY, method: "initialize", params: carried.hello });
+  transport.onmessage({ jsonrpc: "2.0", method: "notifications/initialized" });
+  server.sendToolListChanged();
+  process.stderr.write(`vitela-bridge: renewed in place, now build ${BUILD}\n`);
+}
+
+/** A git checkout that is not on main is someone working on the bridge:
+ * its code is never loaded into a running session. Any other copy (an
+ * installed package, a checkout on main) is what the author means to run. */
+function released() {
+  const git = join(dirname(SELF), ".git");
+  try {
+    if (!existsSync(git)) return true;
+    if (!statSync(git).isDirectory()) return false; // a worktree
+    return /^ref: refs\/heads\/main\s*$/.test(readFileSync(join(git, "HEAD"), "utf8"));
+  } catch { return false; }
+}
+const canRenew = typeof process.execve === "function" && Boolean(BUILD);
+let newer = null; // { build, at, loads, probedAt } the code on disk, when it is not the code that runs
+function lookForNewer() {
+  const build = buildOnDisk();
+  if (!build || build === BUILD || !released()) { newer = null; return; }
+  // Seen twice in a row: a file caught while it is being written is not loaded.
+  if (newer?.build !== build) { newer = { build, at: Date.now(), loads: null, probedAt: 0 }; return; }
+  if (newer.loads === true || !canRenew) return;
+  // It must load before anything is given up for it: a file that does not
+  // would leave the session with no bridge at all. Asked again each minute,
+  // since what was missing (a dependency still installing) may arrive.
+  if (Date.now() - newer.probedAt < 60_000) return;
+  newer.probedAt = Date.now();
+  const watched = newer;
+  const probe = spawn(process.execPath, [SELF], { env: { ...process.env, VITELA_BRIDGE_PROBE: "1" }, stdio: "ignore" });
+  const stop = setTimeout(() => probe.kill(), 20_000);
+  probe.on("error", () => { clearTimeout(stop); watched.loads = false; });
+  probe.on("exit", (code) => {
+    clearTimeout(stop);
+    watched.loads = code === 0;
+    // The hub goes last, so the port changes hands once and lands on new
+    // code: the sessions attached to it have renewed by then.
+    watched.due = Date.now() + (mode === "hub" ? 20_000 : 2_000 + Math.random() * 4_000);
+    if (watched.loads) for (const wake of [...waiters]) wake(); // a held requests_wait returns, so the moment can come
+  });
+}
+function renewWhenIdle() {
+  if (!newer?.loads || Date.now() < newer.due) return;
+  const idle = inflight.size === 0 && pending.size === 0 && Date.now() - lastTraffic > 1500 && process.stdout.writableLength === 0;
+  if (!idle) return;
+  try {
+    const file = join(mkdtempSync(join(tmpdir(), "vitela-bridge-")), "carry.json");
+    writeFileSync(file, JSON.stringify({
+      hello,
+      since: STARTED,
+      paper: selfSession.tabSock?._project ?? selfInfo.paper,
+      inbox: inbox.map((event) => ({ event, handed: handed.has(event) })),
+    }), { mode: 0o600 });
+    process.stderr.write(`vitela-bridge: build ${newer.build} is on disk (this is ${BUILD}); loading it in place\n`);
+    process.execve(process.execPath, [process.execPath, ...process.execArgv, SELF, ...process.argv.slice(2)], { ...process.env, VITELA_BRIDGE_CARRY: file });
+  } catch (error) {
+    newer.loads = false; newer.probedAt = Date.now();
+    process.stderr.write(`vitela-bridge: could not load the newer bridge in place (${error?.message ?? error}); still on build ${BUILD}\n`);
+  }
+}
+setInterval(lookForNewer, Number(process.env.VITELA_BRIDGE_WATCH_MS ?? 5000)).unref();
+setInterval(renewWhenIdle, 500).unref();
+
 await Promise.race([ready, new Promise((r) => setTimeout(r, 3000))]);
 if (mode === "client") {
   // Say what is true at this moment. Attaching can still be refused, and a

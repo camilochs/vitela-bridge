@@ -71,8 +71,30 @@ sessions can drive two papers at once, with no ports or codes to juggle.
    needs no `project_open`.
 
 `bridge_status` says whether a session is the shared bridge or attached to it, and how many tabs the
-bridge holds. The bridge lives with the session that started it: if that session ends, an attached
-session loses it and must be restarted.
+bridge holds. The bridge lives with the session that started it: when that session ends, an attached
+session takes the port with the same code, and the tabs come back by themselves.
+
+## A bridge that stays current
+
+An agent session can stay open for weeks, and it keeps the bridge it started with. I had a shared
+bridge nine days old with twelve sessions attached to it, and a feature already published in Vitela
+did not show in the tab until I replaced the processes by hand.
+
+Now a bridge watches its own file. When the file changes and the new code loads, the process replaces
+itself as soon as no call is in flight: the same process, the same connection to the agent, and the
+agent is told that the tool list changed. Nothing is restarted. This is `bridge_status` in one Claude
+Code session, before and after I added a tool to the file:
+
+```
+build: 852ec1007a50   me: s62526
+build: b2daf3351335   me: s62526
+```
+
+`bridge_status` gives the `build`, and a `newer` line while a newer file waits for a quiet moment or
+does not load; a file that does not load is never taken. A git checkout that is not on `main` is left
+alone, so working on the bridge does not reach the sessions that use it. This needs a Node that can
+replace a running process (`process.execve`, not on Windows); without it the bridge says a restart is
+needed. A bridge started before this existed has to be restarted once.
 
 ## Editing through cards
 
