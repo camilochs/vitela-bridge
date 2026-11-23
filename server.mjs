@@ -287,6 +287,10 @@ function startHub(wss) {
           else if (!target) socket.send(JSON.stringify({ type: "ask-refused", id: event.id, reason: "more than one agent session is on this machine: choose the one that works here (Agent, then Use here) and send it again" }));
           else if (!target.asks) socket.send(JSON.stringify({ type: "ask-refused", id: event.id, reason: "the agent session on this paper runs an earlier bridge that cannot take requests: restart that agent and send it again" }));
           else {
+            // The session works on this tab from now on: its card goes where
+            // the author asked. Without this it had to open the paper first,
+            // and opening it reloaded the editor under the author's hands.
+            if (target.tabSock !== socket) bind(target, socket);
             if (target === selfSession) receive(event); else target.deliver({ type: "event", event });
             socket.send(JSON.stringify({ type: "ask-sent", id: event.id, session: target.info?.id ?? null }));
           }
@@ -533,8 +537,9 @@ function authorEvent(msg) {
 function receive(event) {
   inbox.push({ ...event, at: new Date().toISOString() });
   for (const wake of [...waiters]) wake();
-  // The request may come from a paper this session has not opened yet.
-  const paper = event.project ? ` (project ${event.project}; if it is not the project you have open, call project_open with that id first)` : "";
+  // The bridge has already put this session on the tab the request came
+  // from; the project is named so the agent knows which paper it is.
+  const paper = event.project ? ` (project ${event.project}, already open in the author's tab: do not call project_open)` : "";
   const content = event.kind === "ask"
     ? `The author selected text in ${event.file}${paper} and asks for a change.\n\nRequest: ${event.request}\n\nSelected text, exactly as it stands in the file:\n${event.text}\n\nAnswer with ONE card anchored on that text (revision_propose, or revision_propose_set when it is one change in several places) and pass request: "${event.id}", so the tab shows the card as the answer to this request.`
     : `The author rejected your card ${event.revision} in ${event.file}${paper}${event.request ? ` (it answered the request: ${event.request})` : ""}${event.comment ? `, with this comment:\n${event.comment}` : ", without a comment."}\n\nThe rejected card read:\n${event.excerpt}\n\nThe rejection restored the original text: read the file again, then propose a new card that answers the comment, and pass request: "${event.id}".`;

@@ -36,7 +36,7 @@ const oldB = await session("old-b", OLD);
 const current = await session("current", process.env.BRIDGE ?? `${here}server.mjs`); await wait(1500);
 
 // A tab that behaves as Vitela's: it pairs, answers calls, and comes back by itself.
-const seen = { paired: [], replies: [], calls: 0 };
+const seen = { paired: [], replies: [], calls: 0, opened: 0, rows: [] };
 let tab;
 function openTab() {
   tab = new WebSocket(`ws://127.0.0.1:${PORT}`);
@@ -45,6 +45,8 @@ function openTab() {
     const msg = JSON.parse(String(raw));
     if (msg.type === "paired") seen.paired.push(msg);
     if (msg.type === "ask-sent" || msg.type === "ask-refused") seen.replies.push(msg);
+    if (msg.type === "sessions") seen.rows = msg.list;
+    if (msg.type === "call" && msg.tool === "project.open") seen.opened++;
     if (msg.type === "call") { seen.calls++; tab.send(JSON.stringify({ type: "result", id: msg.id, ok: true, value: [{ id: "p-paper", name: "paper" }] })); }
   });
   tab.on("close", () => setTimeout(openTab, 300));
@@ -67,6 +69,9 @@ check("after: an earlier session's tool call reaches the tab", seen.calls === ca
 tab.send(JSON.stringify({ type: "ask", id: "h1", file: "main.xtex", text: "a sentence", request: "shorter" }));
 await wait(600);
 check("after: a request goes to the one session that can take it, without choosing", seen.replies.at(-1)?.type === "ask-sent" && current.heard.some((p) => p.meta?.request_id === "h1" && /project p-paper/.test(p.content)));
+const before = seen.opened;
+await current.client.callTool({ name: "files_list", arguments: {} });
+check("after: that session's calls go to the tab that asked, with no project_open", seen.opened === before && seen.rows.find((r) => r.id === `s${current.pid}`)?.here === true);
 
 tab.removeAllListeners("close"); tab.close();
 for (const s of [oldA, oldB, current]) await s.client.close();
