@@ -14,11 +14,11 @@ const SERVER = process.env.BRIDGE ?? new URL("../server.mjs", import.meta.url).p
 const env = { ...process.env, VITELA_BRIDGE_PORT: String(PORT), VITELA_BRIDGE_CODE: CODE, VITELA_BRIDGE_HOST: "127.0.0.1" };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function session(name) {
+async function session(name, more = {}) {
   const heard = [];
   const client = new Client({ name, version: "1" });
   client.fallbackNotificationHandler = async (n) => { if (n.method === "notifications/claude/channel") heard.push(n.params); };
-  await client.connect(new StdioClientTransport({ command: process.execPath, args: [SERVER], env, stderr: "ignore" }));
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [SERVER], env: { ...env, ...more }, stderr: "ignore" }));
   return { client, heard, name };
 }
 const textOf = (r) => r.content.map((c) => c.text).join("");
@@ -107,6 +107,28 @@ tab.send(JSON.stringify({ type: "ask", id: "q4", file: "main.xtex", text: "a fou
 await wait(400);
 check("a session on an earlier bridge: the request is refused with the reason", replies.at(-1)?.type === "ask-refused" && replies.at(-1)?.id === "q4" && /restart/.test(replies.at(-1)?.reason ?? "") && !reached.includes("event"));
 old.close();
+
+// A session that listens (started so that a request begins a turn by
+// itself) gets the request of a tab whose own session would only keep it;
+// the author's explicit choice still wins.
+const listener = await session("listening-session", { VITELA_BRIDGE_LISTENS: "1" });
+await wait(1500);
+const tab2 = new WebSocket(`ws://127.0.0.1:${PORT}`);
+await new Promise((r) => tab2.on("open", r));
+const replies2 = [];
+tab2.on("message", (raw) => { const msg = JSON.parse(String(raw)); if (msg.type === "ask-sent" || msg.type === "ask-refused") replies2.push(msg); });
+tab2.send(JSON.stringify({ type: "pair", code: CODE, project: "p2" }));
+await wait(400);
+tab2.send(JSON.stringify({ type: "ask", id: "q5", file: "main.xtex", text: "a fifth sentence", request: "to whoever listens" }));
+await wait(600);
+check("no session on the tab: the request goes to the one that listens", replies2.at(-1)?.type === "ask-sent" && listener.heard.some((p) => p.meta?.request_id === "q5"));
+tab2.send(JSON.stringify({ type: "choose", session: rows.find((r) => r.name.startsWith("other"))?.id }));
+await wait(300);
+tab2.send(JSON.stringify({ type: "ask", id: "q6", file: "main.xtex", text: "a sixth sentence", request: "to the one I chose" }));
+await wait(600);
+check("the author's choice wins over the listening session", other.heard.some((p) => p.meta?.request_id === "q6") && !listener.heard.some((p) => p.meta?.request_id === "q6"));
+tab2.close();
+await listener.client.close();
 
 tab.close();
 await other.client.close();

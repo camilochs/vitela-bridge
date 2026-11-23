@@ -129,7 +129,20 @@ function selfName() {
 // HUB state
 const tabs = new Set();       // browser sockets; each carries _project and _session
 const sessions = new Set();   // { tabSock, deliver, info } — the hub's own session and every attached one
-const selfSession = { tabSock: null, info: selfInfo, asks: true }; // this process's own MCP session
+// A session listens when a request starts a turn in it by itself. The MCP
+// handshake does not say so (Claude Code declares the same capabilities with
+// and without the channel), so it is read from how the agent was started:
+// the flag that loads this server as a channel on the parent's command line.
+// VITELA_BRIDGE_LISTENS=1 says it for any other client that reacts by itself.
+// The hub uses it to send a request where it will be answered, not where it
+// would wait for someone to tell the agent.
+const LISTENS = process.env.VITELA_BRIDGE_LISTENS === "1" || (() => {
+  try {
+    const parent = execSync(`ps -o command= -p ${process.ppid}`, { stdio: ["ignore", "pipe", "ignore"] }).toString();
+    return /--(dangerously-load-development-channels|channels)\b[^\n]*vitela-bridge/.test(parent);
+  } catch { return false; }
+})();
+const selfSession = { tabSock: null, info: selfInfo, asks: true, listens: LISTENS }; // this process's own MCP session
 sessions.add(selfSession);
 
 function tabList() { return [...tabs].filter((t) => t.readyState === 1); }
@@ -143,6 +156,7 @@ function sessionRows(forTab) {
     since: s.info?.since ?? null,
     paper: s.tabSock?._project ?? s.info?.paper ?? null,
     here: Boolean(forTab && s.tabSock === forTab),
+    listens: Boolean(s.listens),
   }));
 }
 /** Every tab learns which sessions exist and which one is bound to it. */
@@ -247,6 +261,7 @@ function startHub(wss) {
             leave: () => { try { socket.close(); } catch { /* gone */ } },
             info: { id: msg.id ?? `s${nextId++}`, name: msg.name ?? "agent", since: msg.since ?? Date.now(), paper: msg.paper ?? null },
             asks: msg.asks === true, // a session on an earlier bridge would drop a request
+            listens: msg.asks === true && msg.listens === true,
           };
           sessions.add(session);
           socket.send(JSON.stringify({ type: "attached" }));
@@ -270,6 +285,7 @@ function startHub(wss) {
         } else if (msg.type === "choose") {
           // The author picks, from the tab, which session works here.
           const chosen = [...sessions].find((s) => s.info?.id === msg.session);
+          socket._chose = chosen ?? null; // the author's own choice outranks where a request would go by itself
           if (chosen) bind(chosen, socket); else if (socket._session) unbind(socket._session);
         } else if (msg.type === "ask" || msg.type === "rejected") {
           // The author asks for a change, or rejects a card with a comment:
@@ -282,7 +298,14 @@ function startHub(wss) {
           // machine can take requests, it goes there: the author is not asked
           // to choose among sessions of which only one could answer.
           const able = [...sessions].filter((s) => s.asks);
-          const target = socket._session?.asks ? socket._session : able.length === 1 ? able[0] : socket._session ?? null;
+          const listening = able.filter((s) => s.listens);
+          const here = socket._session;
+          // In order: the session the author chose for this tab; the session
+          // on this tab when it listens; the one listening session on the
+          // machine; the session on this tab when it can at least keep the
+          // request; the only one that can.
+          const chose = here && socket._chose === here && here.asks;
+          const target = chose || here?.listens ? here : listening.length === 1 ? listening[0] : here?.asks ? here : able.length === 1 ? able[0] : here ?? null;
           if (!event) socket.send(JSON.stringify({ type: "ask-refused", id: msg.id ?? null, reason: "the request carried no text" }));
           else if (!target) socket.send(JSON.stringify({ type: "ask-refused", id: event.id, reason: "more than one agent session is on this machine: choose the one that works here (Agent, then Use here) and send it again" }));
           else if (!target.asks) socket.send(JSON.stringify({ type: "ask-refused", id: event.id, reason: "the agent session on this paper runs an earlier bridge that cannot take requests: restart that agent and send it again" }));
@@ -355,7 +378,7 @@ function startClient() {
     const ws = new WebSocket(url, { rejectUnauthorized: false });
     hubServer = ws;
     const silence = setTimeout(() => { if (!answered && mode === "client") { try { ws.close(); } catch { /* down */ } takeOver(); } }, 2500);
-    ws.on("open", () => { ws.send(JSON.stringify({ type: "attach", code: CODE, id: selfInfo.id, name: selfName(), since: STARTED, paper: selfInfo.paper, asks: true })); });
+    ws.on("open", () => { ws.send(JSON.stringify({ type: "attach", code: CODE, id: selfInfo.id, name: selfName(), since: STARTED, paper: selfInfo.paper, asks: true, listens: LISTENS })); });
     ws.on("message", (raw) => {
       let msg; try { msg = JSON.parse(String(raw)); } catch { return; }
       if (msg.type === "attached") { answered = true; attached = true; refusals = 0; clearTimeout(silence); socketError = null; readyResolve(); return; }
