@@ -87,9 +87,9 @@ The bridge tells the agent how to edit when it connects (the MCP server's instru
 
 ## Asking from the tab
 
-With an agent connected, selecting text in Vitela's editor offers **Ask Claude**. I write what should change, and the request goes to the session that works on that tab. The answer comes back as a card, which shows the request it answers. If I reject one of the agent's cards, Vitela asks why; the comment goes to the agent, and it proposes again.
+With an agent connected, selecting text in Vitela's editor offers **Ask the agent**. I write what should change, and the request goes to the session that works on that tab. The answer comes back as a card, which shows the request it answers. If I reject one of the agent's cards, Vitela asks why; the comment goes to the agent, and it proposes again.
 
-For the request to start a turn on its own, the session has to be launched with the bridge as a channel. Channels are a research preview of Claude Code, so for now that means the development flag:
+This works with any MCP client: the agent reads what I asked with `requests_list`. In Claude Code the request can also start a turn on its own, when the session is launched with the bridge as a channel. Channels are a research preview, so for now that means the development flag:
 
 ```
 claude --dangerously-load-development-channels server:vitela-bridge
@@ -101,7 +101,7 @@ Claude Code asks once to confirm the flag, and then shows:
 Channels (experimental) messages from server:vitela-bridge inject directly in this session
 ```
 
-Without the flag nothing is lost. The request waits in Vitela's corner, and in `requests_list`, until I tell the session to look. A card answers a request when the agent passes its id as `request` in `revision_propose` or `revision_propose_set`.
+With another client, or without the flag, the request waits in Vitela's corner, and in `requests_list` while that session runs, until I tell the agent to look. A card answers a request when the agent passes its id as `request` in `revision_propose` or `revision_propose_set`.
 
 ## Tools
 
